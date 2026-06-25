@@ -1,0 +1,14 @@
+# Core
+numpy
+scipy
+Pillow
+trimesh
+pyyaml
+torch
+torchvision
+
+# Model packages — install from source as noted in each wrapper
+# WiLoR:    pip install git+https://github.com/rolpotamias/WiLoR
+# SAM-2:    pip install git+https://github.com/facebookresearch/segment-anything-2
+# MoGe:     pip install git+https://github.com/microsoft/MoGe
+# SAM-3D:   install per upstream instructions (checkpoint + inference script)

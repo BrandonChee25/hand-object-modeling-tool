@@ -1,0 +1,26 @@
+# Hand-Object Modeling Tool — default configuration
+# Override individual keys by passing --config my_override.yaml to the CLI.
+
+device: cuda
+
+# --- Model checkpoints (paths relative to repo root or absolute) ---
+wilor_checkpoint: checkpoints/wilor.pth
+moge_checkpoint: checkpoints/moge.pth
+sam2_checkpoint: checkpoints/sam2_hiera_large.pt
+sam2_config: sam2_hiera_large.yaml
+sam3d_checkpoint: checkpoints/sam3d.pth
+
+# --- Stage 1: Preprocessing ---
+hand_detection_confidence: 0.3   # minimum YOLO score to accept a hand bbox
+
+# --- Stage 3: Object segmentation ---
+crop_padding_px: 32              # pixels to pad around the object crop
+hand_overlap_threshold: 0.30     # max fraction of a segment overlapping the hand
+
+# --- Stage 5: Guided diffusion pose tracking ---
+n_pose_candidates: 25            # number of flow trajectories sampled per frame
+alpha_s: 0.95                    # shape anchoring strength (near 1 = rigid shape)
+alpha_p_range: [0.0, 0.6]        # [min, max] adaptive pose guidance weight
+cluster_threshold_deg: 15.0      # rotation tolerance for SE(3) candidate clustering
+cluster_threshold_m: 0.05        # translation tolerance (metres) for clustering
+n_diffusion_steps: 50            # flow-matching denoising steps per trajectory
