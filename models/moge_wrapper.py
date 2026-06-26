@@ -20,7 +20,8 @@ class MoGeModel:
     def _load(self) -> None:
         if self._model is not None:
             return
-        from moge.model import MoGeModel as _MoGe
+        from moge.model import import_model_class_by_version
+        _MoGe = import_model_class_by_version("v1")
         self._model = _MoGe.from_pretrained(self.checkpoint).to(self.device).eval()
 
     def estimate(self, image: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -41,11 +42,10 @@ class MoGeModel:
         inp = inp.unsqueeze(0).to(self.device)
 
         with torch.no_grad():
-            output = self._model.infer(inp)
+            output = self._model.infer(inp, apply_mask=False, use_fp16=False)
 
-        # MoGe returns a point map (H, W, 3) and intrinsics.
-        points = output["points"].squeeze(0).cpu().numpy()   # (H, W, 3)
-        depth = points[:, :, 2].astype(np.float32)
+        # Use the depth key directly; points[:,:,2] can be inf when apply_mask=True.
+        depth = output["depth"].squeeze(0).cpu().numpy().astype(np.float32)  # (H, W)
 
         intrinsics = output["intrinsics"].squeeze(0).cpu().numpy()  # (3, 3) normalised
         # Denormalise to pixel units.

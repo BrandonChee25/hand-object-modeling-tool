@@ -31,6 +31,11 @@ def parse_args() -> argparse.Namespace:
         "--config", type=Path, default=Path("config/default.yaml"),
         help="YAML config file (default: config/default.yaml).",
     )
+    p.add_argument(
+        "--object-point", type=int, nargs=2, metavar=("X", "Y"), default=None,
+        help="Pixel coordinate of a point on the held object in the anchor frame. "
+             "Overrides automatic object detection. Use when auto-detection picks the wrong object.",
+    )
     return p.parse_args()
 
 
@@ -42,6 +47,8 @@ def load_config(path: Path) -> dict:
 def main() -> None:
     args = parse_args()
     cfg = load_config(args.config)
+    if args.object_point:
+        cfg["object_point"] = args.object_point
     runner = PipelineRunner(cfg)
     runner.run(args.frames, args.output)
 

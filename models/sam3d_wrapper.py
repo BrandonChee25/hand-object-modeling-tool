@@ -76,7 +76,7 @@ class SAM3DModel:
 
         with torch.no_grad():
             scene_codes = self._model([pil_image], device=self.device)
-            meshes = self._model.extract_mesh(scene_codes, resolution=256)
+            meshes = self._model.extract_mesh(scene_codes, has_vertex_color=False, resolution=256)
 
         mesh = meshes[0]
         # mesh is a trimesh.Trimesh object

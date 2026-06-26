@@ -5,10 +5,11 @@ device: cuda
 
 # --- Model checkpoints (paths relative to repo root or absolute) ---
 wilor_checkpoint: checkpoints/wilor.pth
-moge_checkpoint: checkpoints/moge.pth
-sam2_checkpoint: checkpoints/sam2_hiera_large.pt
-sam2_config: sam2_hiera_large.yaml
-sam3d_checkpoint: checkpoints/sam3d.pth
+moge_checkpoint: Ruicheng/moge-vitl
+sam2_checkpoint: checkpoints/sam2.1_hiera_large.pt
+sam2_config: configs/sam2.1/sam2.1_hiera_l.yaml
+# sam3d_checkpoint unused — SAM-3D is not publicly released; TripoSR is used instead
+# (weights download automatically from HuggingFace: stabilityai/TripoSR)
 
 # --- Stage 1: Preprocessing ---
 hand_detection_confidence: 0.3   # minimum YOLO score to accept a hand bbox
@@ -16,6 +17,11 @@ hand_detection_confidence: 0.3   # minimum YOLO score to accept a hand bbox
 # --- Stage 3: Object segmentation ---
 crop_padding_px: 32              # pixels to pad around the object crop
 hand_overlap_threshold: 0.30     # max fraction of a segment overlapping the hand
+
+# --- Stage 6: Alignment ---
+grip_position: 0.6      # 0=palm centre, 1=fingertips; controls where object is centred on hand
+flip_object: false      # set true if the object appears upside-down in the output
+object_roll_degrees: 0  # rotate object around the hand long-axis (degrees); fine-tune orientation
 
 # --- Stage 5: Guided diffusion pose tracking ---
 n_pose_candidates: 25            # number of flow trajectories sampled per frame

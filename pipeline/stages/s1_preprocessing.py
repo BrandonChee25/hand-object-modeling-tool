@@ -24,6 +24,7 @@ class PreprocessingStage:
         self.cfg = cfg
         self.detector = WiLoRDetector(
             confidence_threshold=cfg.get("hand_detection_confidence", 0.3),
+            device=cfg.get("device", "cuda"),
         )
 
     def run(self, frames_dir: Path, data: PipelineData) -> PipelineData:

@@ -25,7 +25,7 @@ class ObjectMeshGenerationStage:
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.sam3d = SAM3DModel(
-            checkpoint=cfg["sam3d_checkpoint"],
+            checkpoint=cfg.get("sam3d_checkpoint", "stabilityai/TripoSR"),
             device=cfg.get("device", "cuda"),
         )
 

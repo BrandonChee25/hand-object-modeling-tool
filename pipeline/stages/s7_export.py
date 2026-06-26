@@ -30,12 +30,12 @@ class ExportStage:
         scene = data.aligned_scene
 
         hand_mesh = trimesh.Trimesh(
-            vertices=scene.hand_vertices,
+            vertices=np.nan_to_num(scene.hand_vertices),
             faces=scene.hand_faces,
             process=False,
         )
         object_mesh = trimesh.Trimesh(
-            vertices=scene.object_vertices,
+            vertices=np.nan_to_num(scene.object_vertices),
             faces=scene.object_faces,
             process=False,
         )

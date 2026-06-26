@@ -47,7 +47,7 @@ def depth_lift_mask(
     fx, fy = K[0, 0], K[1, 1]
     cx, cy = K[0, 2], K[1, 2]
 
-    ys, xs = np.where(mask & (depth > 0))
+    ys, xs = np.where(mask & (depth > 0) & np.isfinite(depth))
     zs = depth[ys, xs]
     x3d = (xs - cx) * zs / fx
     y3d = (ys - cy) * zs / fy
@@ -64,7 +64,12 @@ def solve_scale_least_squares(
     Minimises sum_i (k * src_points[i,2] - z_ref)^2 over all object points.
     """
     zs = src_points[:, 2]
-    k = np.dot(zs, np.full_like(zs, z_ref)) / np.dot(zs, zs)
+    denom = np.dot(zs, zs)
+    if denom < 1e-8 or z_src < 1e-8:
+        return 1.0  # fallback: no rescaling
+    k = np.dot(zs, np.full_like(zs, z_ref)) / denom
+    if not np.isfinite(k) or k <= 0:
+        return 1.0
     return float(k)
 
 

@@ -1,72 +1,59 @@
-"""WiLoR model wrappers.
+"""WiLoR-mini model wrappers.
 
-WiLoR (Wild Loco Reconstruction) uses a DINOv2-L backbone to estimate MANO
-parameters from a single image crop.
+WiLoR-mini is a lightweight reimplementation of WiLoR that provides a single
+unified pipeline for hand detection + MANO reconstruction.
 
-Install: pip install git+https://github.com/rolpotamias/WiLoR
+Install: pip install git+https://github.com/warmshao/WiLoR-mini
 Weights:  downloaded automatically from HuggingFace on first use.
 """
 
 from __future__ import annotations
-from pathlib import Path
 
 import numpy as np
 import torch
-from PIL import Image
+from scipy.spatial.transform import Rotation
+
+# Module-level cache so both wrapper classes share one loaded pipeline per device.
+_pipeline_cache: dict[str, object] = {}
+
+
+def _get_pipeline(device: str):
+    if device not in _pipeline_cache:
+        from wilor_mini.pipelines.wilor_hand_pose3d_estimation_pipeline import (
+            WiLorHandPose3dEstimationPipeline,
+        )
+        import utils.geometry as _geom
+        dtype = torch.float16 if "cuda" in device else torch.float32
+        pipe = WiLorHandPose3dEstimationPipeline(device=device, dtype=dtype)
+        _pipeline_cache[device] = pipe
+        # Populate the real MANO face topology now that the model is loaded.
+        _geom.MANO_FACES = pipe.wilor_model.mano.faces.astype("int32")
+    return _pipeline_cache[device]
 
 
 class WiLoRDetector:
-    """Lightweight YOLO-based hand bounding-box detector bundled with WiLoR."""
+    """Hand bounding-box detector backed by WiLoR-mini's unified pipeline."""
 
-    def __init__(self, confidence_threshold: float = 0.3):
+    def __init__(self, confidence_threshold: float = 0.3, device: str = "cuda"):
         self.confidence_threshold = confidence_threshold
-        self._model = None
-
-    def _load(self) -> None:
-        if self._model is not None:
-            return
-        from wilor.models import WiLoR as _WiLoR
-        # WiLoR ships its own ViTDet hand detector; load it here.
-        # The detector is separate from the MANO regressor.
-        from wilor.utils.hand_detector import HandDetector
-        self._model = HandDetector(confidence_threshold=self.confidence_threshold)
+        self.device = device
 
     def detect(self, image: np.ndarray) -> tuple[np.ndarray | None, float]:
         """Return (bbox_xyxy, confidence) for the most prominent hand, or (None, 0)."""
-        self._load()
-        detections = self._model.detect(image)  # list of (bbox, score)
-        if not detections:
+        outputs = _get_pipeline(self.device).predict(image)
+        if not outputs:
             return None, 0.0
-        # Pick the detection with the highest score.
-        best_bbox, best_score = max(detections, key=lambda x: x[1])
-        return np.array(best_bbox, dtype=np.float32), float(best_score)
+        # WiLoR-mini doesn't expose per-detection confidence scores; use 1.0.
+        bbox = np.array(outputs[0]["hand_bbox"], dtype=np.float32)
+        return bbox, 1.0
 
 
 class WiLoRModel:
-    """Runs WiLoR inference to produce MANO parameters + mesh vertices."""
+    """Runs WiLoR-mini inference to produce MANO parameters + mesh vertices."""
 
     def __init__(self, checkpoint: str, device: str = "cuda"):
-        self.checkpoint = checkpoint  # ignored — WiLoR auto-downloads from HF
+        self.checkpoint = checkpoint  # unused — WiLoR-mini auto-downloads weights
         self.device = device
-        self._model = None
-        self._mano_layer = None
-
-    def _load(self) -> None:
-        if self._model is not None:
-            return
-        from wilor.models import WiLoR as _WiLoR
-        from smplx import build_layer as build_mano
-
-        self._model = _WiLoR.from_pretrained("rolpotamias/WiLoR").to(self.device).eval()
-
-        # MANO layer gives us the face topology and forward kinematics.
-        self._mano_layer = build_mano(
-            model_type="mano",
-            model_path="checkpoints/mano",  # download MANO weights separately
-            is_rhand=True,
-            num_pca_comps=45,
-            flat_hand_mean=False,
-        ).to(self.device)
 
     def reconstruct(self, image: np.ndarray, hand_bbox: np.ndarray) -> dict:
         """
@@ -78,40 +65,48 @@ class WiLoRModel:
         Returns
         -------
         dict with keys:
-            pose        : (48,)  MANO axis-angle pose
-            shape       : (10,)  MANO betas
+            pose        : (48,)  MANO axis-angle pose (global_orient + hand_pose)
+            shape       : (10,)  MANO betas (zeros — not exposed by WiLoR-mini)
             global_rot  : (3, 3)
-            translation : (3,)   raw un-rescaled translation
+            translation : (3,)   camera-space translation
             vertices    : (778, 3)
             keypoints_3d: (21, 3)
         """
-        self._load()
+        outputs = _get_pipeline(self.device).predict(image)
+        if not outputs:
+            raise RuntimeError("WiLoR-mini returned no detections for this frame.")
 
-        x1, y1, x2, y2 = hand_bbox.astype(int)
-        crop = image[y1:y2, x1:x2]
-        pil_crop = Image.fromarray(crop).resize((256, 256))
-        inp = np.array(pil_crop).astype(np.float32) / 255.0
-        inp = torch.from_numpy(inp).permute(2, 0, 1).unsqueeze(0).to(self.device)
+        out = _best_matching_detection(outputs, hand_bbox)
+        preds = out["wilor_preds"]
 
-        with torch.no_grad():
-            out = self._model(inp)
+        vertices = np.array(preds["pred_vertices"][0], dtype=np.float32)        # (778, 3)
+        keypoints_3d = np.array(preds["pred_keypoints_3d"][0], dtype=np.float32)  # (21, 3)
+        translation = np.array(preds["pred_cam_t_full"][0], dtype=np.float32)   # (3,)
 
-        pose = out["pose"].squeeze(0).cpu().numpy()         # (48,)
-        shape = out["betas"].squeeze(0).cpu().numpy()       # (10,)
-        global_rot_aa = out["global_orient"].squeeze(0).cpu().numpy()  # (3,)
-        trans = out["transl"].squeeze(0).cpu().numpy()      # (3,)
-
-        from scipy.spatial.transform import Rotation
-        global_rot = Rotation.from_rotvec(global_rot_aa).as_matrix()
-
-        vertices = out["vertices"].squeeze(0).cpu().numpy()         # (778, 3)
-        keypoints = out["joints"].squeeze(0).cpu().numpy()          # (21, 3)
+        global_orient_aa = np.array(preds["global_orient"][0], dtype=np.float32).flatten()[:3]  # (3,)
+        hand_pose = np.array(preds["hand_pose"][0], dtype=np.float32).flatten()[:45]            # (45,)
+        pose = np.concatenate([global_orient_aa, hand_pose])                     # (48,)
+        global_rot = Rotation.from_rotvec(global_orient_aa).as_matrix()          # (3, 3)
 
         return {
             "pose": pose,
-            "shape": shape,
+            "shape": np.zeros(10, dtype=np.float32),
             "global_rot": global_rot,
-            "translation": trans,
+            "translation": translation,
             "vertices": vertices,
-            "keypoints_3d": keypoints,
+            "keypoints_3d": keypoints_3d,
         }
+
+
+def _best_matching_detection(outputs: list[dict], ref_bbox: np.ndarray) -> dict:
+    """Return the detection whose bbox centroid is closest to ref_bbox centroid."""
+    ref_cx = (ref_bbox[0] + ref_bbox[2]) / 2
+    ref_cy = (ref_bbox[1] + ref_bbox[3]) / 2
+    best, best_dist = outputs[0], float("inf")
+    for out in outputs:
+        b = out["hand_bbox"]
+        cx, cy = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
+        dist = (cx - ref_cx) ** 2 + (cy - ref_cy) ** 2
+        if dist < best_dist:
+            best, best_dist = out, dist
+    return best
