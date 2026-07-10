@@ -72,7 +72,7 @@ class PipelineRunner:
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
 
-        print("[5/7] Object pose estimation (ICP registration)...")
+        print("[5/7] Object pose estimation...")
         data = self.s5.run(data)
 
         print("[6/7] Hand-object metric alignment...")
