@@ -25,8 +25,8 @@ from scipy.ndimage import binary_dilation
 
 from pipeline.data import ObjectSegmentation, PipelineData
 
-# MANO 21-joint convention: joints 4,8,12,16,20 are fingertips; 0 is wrist.
-_FINGERTIP_JOINTS = [4, 8, 12, 16, 20]
+# MANO vertex indices for fingertips (same set used in Stage 5).
+_FINGERTIP_VERT_IDX = [745, 317, 444, 556, 673]
 
 
 def _load_seg_model(cfg: dict):
@@ -55,40 +55,41 @@ def _load_seg_model(cfg: dict):
 
 def _fingertip_object_bbox(
     hand_result,
-    K: np.ndarray,
+    hand_bbox_px: np.ndarray,
     image_shape: tuple[int, int],
 ) -> tuple[int, int, int, int] | None:
-    """Return a pixel bbox for the expected object location using fingertip projections.
+    """Return a pixel bbox for the expected object location.
 
-    Projects the MANO fingertip joints (camera space) to 2D, then places a
-    search box just BEYOND the fingertips in the palm→fingertip direction.
-    This avoids including the arm/wrist in the SAM3 prompt.
+    Uses the WiLoR grip axis (palm→fingertips in camera space) to find the
+    direction the object extends, then places a search box just beyond the
+    fingertip edge of the hand bbox.  No camera intrinsics needed — scale
+    and position come from the known hand bbox in pixel space.
     """
-    kp = hand_result.keypoints_3d  # (21, 3) camera space
-    if kp is None or len(kp) < 21:
+    vertices = hand_result.vertices   # (778, 3) MANO local space
+    R        = hand_result.global_rot # (3, 3)  local → camera
+
+    hand_center_local = vertices.mean(0)
+    tip_centroid_local = vertices[_FINGERTIP_VERT_IDX].mean(0)
+    grip_local = tip_centroid_local - hand_center_local  # palm→fingertips in local space
+
+    # Rotate grip axis to camera space, then project to 2D image direction.
+    # We only need the xy components (the "sideways" direction in the image).
+    grip_cam = R @ grip_local
+    direction_2d = np.array([grip_cam[0], grip_cam[1]])
+    d_norm = float(np.linalg.norm(direction_2d))
+    if d_norm < 1e-6:
         return None
+    direction_2d /= d_norm
 
-    K = np.array(K, dtype=np.float64)
+    # Use the hand bbox for scale and anchor position.
+    hx1, hy1, hx2, hy2 = hand_bbox_px.astype(float)
+    hand_cx   = (hx1 + hx2) / 2
+    hand_cy   = (hy1 + hy2) / 2
+    hand_size = max(hx2 - hx1, hy2 - hy1)
 
-    def project(p3d: np.ndarray) -> np.ndarray:
-        p = K @ p3d.astype(np.float64)
-        return np.array([p[0] / p[2], p[1] / p[2]])
-
-    wrist_2d      = project(kp[0])
-    fingertips_2d = np.array([project(kp[i]) for i in _FINGERTIP_JOINTS])  # (5, 2)
-    tip_centroid  = fingertips_2d.mean(0)  # (2,)
-
-    direction = tip_centroid - wrist_2d
-    dist = float(np.linalg.norm(direction))
-    if dist < 1e-3:
-        return None
-    direction /= dist
-
-    # Place the search box just beyond the fingertip centroid.
-    # dist ≈ distance from wrist to fingertips in pixels ≈ half the hand length.
-    hand_len_px = dist
-    object_center = tip_centroid + direction * hand_len_px * 0.35
-    radius = hand_len_px * 0.55  # generous radius to capture the held object
+    # Object center: one hand-length beyond the palm in the grip direction.
+    object_center = np.array([hand_cx, hand_cy]) + direction_2d * hand_size * 0.9
+    radius = hand_size * 0.55
 
     H, W = image_shape
     x1 = int(np.clip(object_center[0] - radius, 0, W - 1))
@@ -188,10 +189,10 @@ class ObjectSegmentationStage:
             # Compute a fingertip-directed search box (avoids the arm/wrist).
             object_bbox_hint = None
             hr = hand_results.get(fidx)
-            if hr is not None and data.camera_intrinsics is not None:
+            if hr is not None:
                 try:
                     object_bbox_hint = _fingertip_object_bbox(
-                        hr, data.camera_intrinsics, (H, W)
+                        hr, frame.hand_bbox, (H, W)
                     )
                 except Exception:
                     pass
