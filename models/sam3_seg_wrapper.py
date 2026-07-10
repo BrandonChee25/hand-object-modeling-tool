@@ -45,34 +45,42 @@ class SAM3SegModel:
         hand_bbox: tuple[int, int, int, int],
         hand_mask: np.ndarray,
         expand: float = 0.3,
+        object_bbox_hint: tuple[int, int, int, int] | None = None,
     ) -> np.ndarray | None:
-        """Single-frame: find held object via expanded hand bbox visual prompt.
+        """Single-frame: find held object via a directed box prompt.
 
-        Converts the expanded hand bbox to SAM3's normalized cxcywh format.
+        If object_bbox_hint is given (fingertip-projected bbox), uses that as
+        the SAM3 prompt — this targets the object region directly and avoids
+        including the arm.  Falls back to expanding the hand bbox otherwise.
+
         Iterates SAM3 candidate masks in confidence order and returns the first
-        one that is mostly OUTSIDE the hand region — arm/body masks have high
-        overlap with the hand bbox and are skipped.
+        one that is mostly OUTSIDE the hand region.
         """
         self._load()
         from PIL import Image as PILImage
         from scipy.ndimage import label as _label, binary_erosion
 
         H, W = image.shape[:2]
-        x1, y1, x2, y2 = (int(v) for v in hand_bbox)
-        bw, bh = x2 - x1, y2 - y1
 
-        pad_x = int(bw * expand)
-        pad_y = int(bh * expand)
-        ex1 = max(0, x1 - pad_x)
-        ey1 = max(0, y1 - pad_y)
-        ex2 = min(W, x2 + pad_x)
-        ey2 = min(H, y2 + pad_y)
-
-        # SAM3 box prompt: normalized cx, cy, w, h in [0, 1]
-        cx   = ((ex1 + ex2) / 2) / W
-        cy   = ((ey1 + ey2) / 2) / H
-        bw_n = (ex2 - ex1) / W
-        bh_n = (ey2 - ey1) / H
+        if object_bbox_hint is not None:
+            ox1, oy1, ox2, oy2 = object_bbox_hint
+            cx   = ((ox1 + ox2) / 2) / W
+            cy   = ((oy1 + oy2) / 2) / H
+            bw_n = (ox2 - ox1) / W
+            bh_n = (oy2 - oy1) / H
+        else:
+            x1, y1, x2, y2 = (int(v) for v in hand_bbox)
+            bw, bh = x2 - x1, y2 - y1
+            pad_x = int(bw * expand)
+            pad_y = int(bh * expand)
+            ex1 = max(0, x1 - pad_x)
+            ey1 = max(0, y1 - pad_y)
+            ex2 = min(W, x2 + pad_x)
+            ey2 = min(H, y2 + pad_y)
+            cx   = ((ex1 + ex2) / 2) / W
+            cy   = ((ey1 + ey2) / 2) / H
+            bw_n = (ex2 - ex1) / W
+            bh_n = (ey2 - ey1) / H
 
         pil = PILImage.fromarray(image)
         state = self._processor.set_image(pil)

@@ -10,7 +10,7 @@ Override with config key  use_sam3: false  to force SAM-2 even when SAM3 is pres
 
 Seed mask selection priority:
   1. object_point in config  →  point prompt (manual, most reliable).
-  2. Otherwise               →  hand-box prompt across N candidate frames.
+  2. Otherwise               →  fingertip-directed box prompt across N candidate frames.
   3. Fallback                →  SAM-2 auto-segment filtered by hand contact + depth.
 
 The seed mask is propagated through all frames using the loaded model's video predictor.
@@ -24,6 +24,9 @@ import numpy as np
 from scipy.ndimage import binary_dilation
 
 from pipeline.data import ObjectSegmentation, PipelineData
+
+# MANO 21-joint convention: joints 4,8,12,16,20 are fingertips; 0 is wrist.
+_FINGERTIP_JOINTS = [4, 8, 12, 16, 20]
 
 
 def _load_seg_model(cfg: dict):
@@ -48,6 +51,55 @@ def _load_seg_model(cfg: dict):
     )
     print("[s3] using SAM-2 for object segmentation")
     return model, "sam2"
+
+
+def _fingertip_object_bbox(
+    hand_result,
+    K: np.ndarray,
+    image_shape: tuple[int, int],
+) -> tuple[int, int, int, int] | None:
+    """Return a pixel bbox for the expected object location using fingertip projections.
+
+    Projects the MANO fingertip joints (camera space) to 2D, then places a
+    search box just BEYOND the fingertips in the palm→fingertip direction.
+    This avoids including the arm/wrist in the SAM3 prompt.
+    """
+    kp = hand_result.keypoints_3d  # (21, 3) camera space
+    if kp is None or len(kp) < 21:
+        return None
+
+    K = np.array(K, dtype=np.float64)
+
+    def project(p3d: np.ndarray) -> np.ndarray:
+        p = K @ p3d.astype(np.float64)
+        return np.array([p[0] / p[2], p[1] / p[2]])
+
+    wrist_2d      = project(kp[0])
+    fingertips_2d = np.array([project(kp[i]) for i in _FINGERTIP_JOINTS])  # (5, 2)
+    tip_centroid  = fingertips_2d.mean(0)  # (2,)
+
+    direction = tip_centroid - wrist_2d
+    dist = float(np.linalg.norm(direction))
+    if dist < 1e-3:
+        return None
+    direction /= dist
+
+    # Place the search box just beyond the fingertip centroid.
+    # dist ≈ distance from wrist to fingertips in pixels ≈ half the hand length.
+    hand_len_px = dist
+    object_center = tip_centroid + direction * hand_len_px * 0.35
+    radius = hand_len_px * 0.55  # generous radius to capture the held object
+
+    H, W = image_shape
+    x1 = int(np.clip(object_center[0] - radius, 0, W - 1))
+    y1 = int(np.clip(object_center[1] - radius, 0, H - 1))
+    x2 = int(np.clip(object_center[0] + radius, 0, W - 1))
+    y2 = int(np.clip(object_center[1] + radius, 0, H - 1))
+
+    if x2 <= x1 or y2 <= y1:
+        return None
+
+    return (x1, y1, x2, y2)
 
 
 class ObjectSegmentationStage:
@@ -116,11 +168,14 @@ class ObjectSegmentationStage:
         return mask
 
     def _find_held_object(self, data: PipelineData) -> tuple[int, np.ndarray]:
-        """Try SAM-2 hand-box prompt across candidate frames; fall back to heuristic."""
+        """Try SAM3 fingertip-directed box prompt across candidate frames; fall back to heuristic."""
         frames = data.frames
         indices = self._candidate_indices(data)
         H, W = frames[0].image.shape[:2]
         max_pixels = 0.30 * H * W
+
+        # Build a quick lookup: frame_index → HandResult
+        hand_results = {r.frame_index: r for r in data.hand_results}
 
         for fidx in indices:
             frame = frames[fidx]
@@ -130,8 +185,26 @@ class ObjectSegmentationStage:
             depth = data.depth_maps.get(fidx, data.depth_map)
             hand_depth = _median_depth(depth, hand_mask)
 
+            # Compute a fingertip-directed search box (avoids the arm/wrist).
+            object_bbox_hint = None
+            hr = hand_results.get(fidx)
+            if hr is not None and data.camera_intrinsics is not None:
+                try:
+                    object_bbox_hint = _fingertip_object_bbox(
+                        hr, data.camera_intrinsics, (H, W)
+                    )
+                except Exception:
+                    pass
+            if object_bbox_hint is not None:
+                print(f"[s3] frame {fidx}: using fingertip-directed bbox {object_bbox_hint}")
+            else:
+                print(f"[s3] frame {fidx}: fingertip projection unavailable, using expanded hand bbox")
+
             mask = self.seg_model.segment_held_object(
-                frame.image, tuple(frame.hand_bbox.astype(int)), hand_mask,
+                frame.image,
+                tuple(frame.hand_bbox.astype(int)),
+                hand_mask,
+                object_bbox_hint=object_bbox_hint,
             )
             if mask is None or not mask.any():
                 print(f"[s3] frame {fidx}: hand-box prompt returned empty")
@@ -147,25 +220,13 @@ class ObjectSegmentationStage:
                 print(f"[s3] frame {fidx}: mask too small ({mask.sum()} px), skipping")
                 continue
 
-            # Reject if the mask centroid is inside the hand bbox — that means
-            # the model picked the hand/arm rather than the held object.
-            ys, xs = np.where(mask)
-            cy_m, cx_m = float(ys.mean()), float(xs.mean())
-            hx1, hy1, hx2, hy2 = frame.hand_bbox.astype(int)
-            if hy1 <= cy_m <= hy2 and hx1 <= cx_m <= hx2:
-                print(f"[s3] frame {fidx}: mask centroid inside hand bbox "
-                      f"({cx_m:.0f},{cy_m:.0f}), skipping")
-                continue
-
-            # Reject if mask depth is far from hand depth.
+            # Reject if mask depth is farther than hand depth (arm extends away).
             if depth is not None and hand_depth is not None:
                 mask_depth = _median_depth(depth, mask)
-                if mask_depth is not None:
-                    rel_diff = abs(mask_depth - hand_depth) / max(hand_depth, 1e-6)
-                    if rel_diff > 0.5:
-                        print(f"[s3] frame {fidx}: mask depth {mask_depth:.2f}m "
-                              f"too far from hand {hand_depth:.2f}m, skipping")
-                        continue
+                if mask_depth is not None and mask_depth > hand_depth * 1.2:
+                    print(f"[s3] frame {fidx}: mask depth {mask_depth:.2f}m "
+                          f"farther than hand {hand_depth:.2f}m, likely arm")
+                    continue
 
             print(f"[s3] hand-box prompt succeeded on frame {fidx} ({mask.sum()} px)")
             return fidx, mask
