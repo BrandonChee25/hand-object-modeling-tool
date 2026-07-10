@@ -35,24 +35,29 @@ class HandReconstructionStage:
         anchor = data.frames[data.anchor_index]
 
         # Metric depth + camera intrinsics from MoGe on the anchor frame.
-        # These are used in Stage 6 for scale alignment.
         depth, K = self.moge.estimate(anchor.image)
         data.depth_map = depth
         data.camera_intrinsics = K
+        data.depth_maps[anchor.index] = depth
 
         results: list[HandResult] = []
         for frame in data.frames:
             if frame.hand_bbox is None:
                 continue
 
+            # Estimate depth for every frame — needed by FoundationPose in Stage 5.
+            if frame.index not in data.depth_maps:
+                frame_depth, _ = self.moge.estimate(frame.image)
+                data.depth_maps[frame.index] = frame_depth
+
+            frame_depth = data.depth_maps[frame.index]
+
             out = self.wilor.reconstruct(frame.image, frame.hand_bbox)
 
-            # WiLoR returns raw MANO translation in normalised camera space;
-            # rescale to metric using fingertip reprojection against MoGe depth.
             metric_trans = _rescale_translation(
                 out["translation"],
                 out["vertices"],
-                depth if frame.index == anchor.index else None,
+                frame_depth if frame.index == anchor.index else None,
                 K,
             )
 

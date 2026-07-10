@@ -30,8 +30,11 @@ class ObjectMeshGenerationStage:
         )
 
     def run(self, data: PipelineData) -> PipelineData:
-        anchor_frame = data.frames[data.anchor_index]
-        anchor_mask = data.object_seg.masks[data.anchor_index]
+        # Use the SAM-2 seed frame — this is where the object mask is most reliable,
+        # and may differ from data.anchor_index when multi-frame detection was used.
+        seed_idx = data.object_seg.anchor_frame_index
+        anchor_frame = data.frames[seed_idx]
+        anchor_mask = data.object_seg.masks[seed_idx]
 
         # Crop the object region; background filled with the model's expected fill.
         cropped_image = crop_with_mask(

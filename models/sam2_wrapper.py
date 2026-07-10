@@ -55,6 +55,82 @@ class SAM2Model:
         best = int(np.argmax(scores))
         return masks[best].astype(bool)
 
+    def segment_with_box(
+        self, image: np.ndarray, box_xyxy: tuple[int, int, int, int]
+    ) -> np.ndarray:
+        """Return a single bool H×W mask for the object inside the given box (x1,y1,x2,y2)."""
+        self._load()
+        self._predictor.set_image(image)
+        x1, y1, x2, y2 = box_xyxy
+        masks, scores, _ = self._predictor.predict(
+            box=np.array([[x1, y1, x2, y2]], dtype=float),
+            multimask_output=True,
+        )
+        best = int(np.argmax(scores))
+        return masks[best].astype(bool)
+
+    def segment_held_object(
+        self,
+        image: np.ndarray,
+        hand_bbox: tuple[int, int, int, int],
+        hand_mask: np.ndarray,
+        expand: float = 0.6,
+    ) -> np.ndarray | None:
+        """Find the object held in the hand using box + negative-point prompts.
+
+        Expands the hand bbox to cover the held object, then places negative
+        (background) points across the palm so SAM-2 segments what is inside
+        the expanded region but is NOT the hand.
+
+        Returns a bool H×W mask, or None if the result is empty.
+        """
+        self._load()
+        self._predictor.set_image(image)
+
+        H, W = image.shape[:2]
+        x1, y1, x2, y2 = (int(v) for v in hand_bbox)
+        bw, bh = x2 - x1, y2 - y1
+
+        pad_x = int(bw * expand)
+        pad_y = int(bh * expand)
+        ex1 = max(0, x1 - pad_x)
+        ey1 = max(0, y1 - pad_y)
+        ex2 = min(W, x2 + pad_x)
+        ey2 = min(H, y2 + pad_y)
+
+        hcx, hcy = (x1 + x2) // 2, (y1 + y2) // 2
+        neg_points = np.array([
+            [hcx, hcy],
+            [hcx, y1 + bh // 4],
+            [hcx, y2 - bh // 4],
+            [x1 + bw // 4, hcy],
+            [x2 - bw // 4, hcy],
+        ], dtype=float)
+        neg_labels = np.zeros(len(neg_points), dtype=int)
+
+        masks, scores, _ = self._predictor.predict(
+            point_coords=neg_points,
+            point_labels=neg_labels,
+            box=np.array([ex1, ey1, ex2, ey2], dtype=float),
+            multimask_output=True,
+        )
+        best = int(np.argmax(scores))
+        mask = masks[best].astype(bool) & ~hand_mask
+
+        # Keep only the largest connected component — spurious stray regions are small.
+        from scipy.ndimage import label as _label, binary_erosion
+        labeled, n = _label(mask)
+        if n > 1:
+            sizes = np.array([(labeled == i).sum() for i in range(1, n + 1)])
+            mask = (labeled == (np.argmax(sizes) + 1)).astype(bool)
+
+        # Erode slightly to drop noisy boundary pixels SAM-2 bleeds into.
+        eroded = binary_erosion(mask, iterations=2)
+        if eroded.any():
+            mask = eroded
+
+        return mask if mask.any() else None
+
     def auto_segment(self, image: np.ndarray) -> list[np.ndarray]:
         """Return list of bool H x W masks from automatic everything-segmentation."""
         self._load()

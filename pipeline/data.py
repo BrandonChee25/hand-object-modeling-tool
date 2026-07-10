@@ -74,7 +74,9 @@ class PipelineData:
     """Accumulates outputs across all stages."""
     frames: list[Frame] = field(default_factory=list)
     anchor_index: int = 0
+    output_dir: Optional[Path] = None              # set by runner; used for debug outputs
     depth_map: Optional[np.ndarray] = None         # (H, W) metric depth at anchor
+    depth_maps: dict = field(default_factory=dict) # frame_index → (H, W) depth
     camera_intrinsics: Optional[np.ndarray] = None # (3, 3) K matrix at anchor
     hand_results: list[HandResult] = field(default_factory=list)
     object_seg: Optional[ObjectSegmentation] = None

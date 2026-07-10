@@ -1,24 +1,19 @@
 """Stage 6 — Metric-scale alignment of hand and object.
 
-Hand vertices from WiLoR live in WiLoR camera space (metric after Stage 2
-rescaling). Object vertices from SAM-3D live in MoGe pointmap space. These
-two coordinate systems share the same camera frame but may differ in overall
-scale because the depth and 3D generation models are independent.
-
-Alignment procedure (from "Do as I Do" §3.4):
-  1. Compute hand centroid c_hand in WiLoR space (from anchor-frame MANO mesh).
-  2. Compute object centroid c_obj in MoGe pointmap space (from anchor-frame
-     depth-lifted object point cloud).
-  3. Solve scale factor:
-       k = z_hand / z_obj
-     where z values are the median depths of the respective centroids, solved
-     via least squares across all visible object points.
-  4. Place the object mesh:
-       obj_target = c_hand + k * (c_obj_world - c_hand_world)
-     This rigidly shifts the object into the same metric space as the hand.
-
-For the static output we use the anchor frame for alignment and export the
-meshes in this unified camera-space frame.
+Both hand and object are placed in MoGe's metric camera space:
+  - Hand: the wrist/palm position is backprojected from the YOLO hand bbox
+    centre using MoGe depth, and the MANO mesh is scaled to match the bbox's
+    apparent size at that depth.
+  - Object: scaled to match its mask's apparent size at the depth-lifted
+    object centroid, then placed at a grip point blended between the palm
+    and fingertip centroid as an initial guess (so it starts inside the
+    hand rather than at the wrist or floating at the fingertips).
+  - Orientation: taken directly from Stage 5's DINOv2 render-and-compare
+    pose estimate (no manual tuning needed).
+  - Contact: the initial placement is then corrected by pushing the object
+    rigidly along the palm→fingertip axis until it no longer penetrates the
+    hand mesh (see _resolve_penetration), rather than relying on a fixed
+    grip point or a hand-tuned scale fudge factor.
 """
 
 from __future__ import annotations
@@ -26,7 +21,7 @@ from __future__ import annotations
 import numpy as np
 
 from pipeline.data import AlignedScene, PipelineData
-from utils.geometry import depth_lift_mask, solve_scale_least_squares
+from utils.geometry import depth_lift_mask
 import utils.geometry as _geom
 
 
@@ -38,7 +33,9 @@ class AlignmentStage:
         anchor_hand = next(
             r for r in data.hand_results if r.frame_index == data.anchor_index
         )
-        anchor_mask = data.object_seg.masks[data.anchor_index]
+        # Object mask comes from the SAM-2 seed frame, not necessarily the hand anchor.
+        seed_idx = data.object_seg.anchor_frame_index
+        anchor_mask = data.object_seg.masks[seed_idx]
 
         # --- hand position and scale from MoGe depth + YOLO bbox ---
         # WiLoR's translation is over-scaled; use MoGe depth at the hand bbox centre
@@ -109,43 +106,29 @@ class AlignmentStage:
         canon_diag = np.linalg.norm(canon_verts.max(0) - canon_verts.min(0))
         obj_scale = obj_metric_diag / max(canon_diag, 1e-6)
 
-        # Grip centre = blend between palm (c_hand) and fingertip centroid.
-        # grip_position=0 → palm centre, 1 → fingertips. Default 0.6 puts the
-        # grip at the proximal-phalanx region where the hand closes around the object.
         FINGERTIP_IDX = [745, 317, 444, 556, 673]  # thumb to pinky in MANO topology
         finger_center_local = anchor_hand.vertices[FINGERTIP_IDX].mean(axis=0)
         finger_center_cam = c_hand + hand_scale * (finger_center_local - mano_center)
         grip_pos = self.cfg.get("grip_position", 0.6)
         grip_center_cam = c_hand + grip_pos * (finger_center_cam - c_hand)
 
-        # Align the object's longest axis with the wrist→fingertip direction.
-        hand_axis = finger_center_cam - c_hand
-        hand_axis = hand_axis / (np.linalg.norm(hand_axis) + 1e-8)
-        R_aligned = _align_primary_axis(canon_verts, hand_axis, obj_points)
+        # ICP (Stage 5) gives rotation; grip_center_cam gives position.
+        # ICP translation drifts when scale has small errors, so position uses
+        # the hand-derived grip-centre which is stable and verified to work.
+        R_aligned, _ = _consensus_pose(data)
 
-        # Optional flip (180° around long axis) and roll correction from config.
-        if self.cfg.get("flip_object", False):
-            # Rotate 180° around the hand axis.
-            K = np.array([[0, -hand_axis[2], hand_axis[1]],
-                          [hand_axis[2], 0, -hand_axis[0]],
-                          [-hand_axis[1], hand_axis[0], 0]])
-            R_flip = np.eye(3) + 2 * K @ K  # Rodrigues for angle=π
-            R_aligned = R_flip @ R_aligned
-
-        roll_deg = self.cfg.get("object_roll_degrees", 0.0)
-        if abs(roll_deg) > 1e-3:
-            angle = np.deg2rad(roll_deg)
-            K = np.array([[0, -hand_axis[2], hand_axis[1]],
-                          [hand_axis[2], 0, -hand_axis[0]],
-                          [-hand_axis[1], hand_axis[0], 0]])
-            R_roll = np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * K @ K
-            R_aligned = R_roll @ R_aligned
-
-        # Apply rotation then scale and place at grip centre.
         obj_verts_posed = canon_verts @ R_aligned.T
         canon_center = obj_verts_posed.mean(axis=0)
         obj_verts_aligned = grip_center_cam + obj_scale * (obj_verts_posed - canon_center)
 
+        # Push out any residual penetration into the hand mesh.
+        obj_verts_aligned = _resolve_penetration(
+            hand_verts_cam,
+            _geom.MANO_FACES,
+            obj_verts_aligned,
+            fallback_dir=finger_center_cam - c_hand,
+            max_push=self.cfg.get("max_contact_push_m", 0.05),
+        )
 
         # Identity world-from-camera (we keep camera as world for simplicity).
         world_from_camera = np.eye(4)
@@ -160,96 +143,62 @@ class AlignmentStage:
         return data
 
 
-def _align_primary_axis(
-    canon_verts: np.ndarray,
-    target_axis: np.ndarray,
-    obj_points: np.ndarray,
+def _resolve_penetration(
+    hand_verts: np.ndarray,
+    hand_faces: np.ndarray,
+    obj_verts: np.ndarray,
+    fallback_dir: np.ndarray,
+    max_push: float = 0.05,
+    max_iters: int = 30,
 ) -> np.ndarray:
-    """Rotate the canonical mesh so its longest axis aligns with target_axis.
+    """Rigidly translate obj_verts out of the hand mesh.
 
-    The secondary axis is chosen to minimise deviation from the depth point
-    cloud's secondary PCA direction (controls roll around the long axis).
+    A single fixed push axis can't resolve penetration for an elongated object
+    lying diagonally across a curved hand: translating it can pull one end
+    clear while driving the other end deeper in. Instead, each iteration finds
+    the currently-penetrating vertices, computes the average vector from each
+    to its nearest point on the hand surface (the locally shortest way out),
+    and takes a small step in that direction — so the push direction adapts
+    as different parts of the object clear the hand mesh.
     """
-    # Primary axis of canonical mesh.
-    c = canon_verts - canon_verts.mean(0)
-    _, _, Vt = np.linalg.svd(c, full_matrices=False)
-    canon_primary = Vt[0]
+    import trimesh
 
-    # Rodrigues rotation: canon_primary → target_axis.
-    v = np.cross(canon_primary, target_axis)
-    cos_a = float(np.dot(canon_primary, target_axis))
-    sin_a = np.linalg.norm(v)
-    if sin_a > 1e-6:
-        K = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
-        R1 = np.eye(3) + K + K @ K * ((1 - cos_a) / sin_a ** 2)
-    else:
-        R1 = np.eye(3) if cos_a > 0 else -np.eye(3)
+    try:
+        hand_mesh = trimesh.Trimesh(vertices=hand_verts, faces=hand_faces, process=False)
+    except Exception:
+        return obj_verts
 
-    # Use depth cloud secondary PCA axis to constrain roll around target_axis.
-    op = obj_points - obj_points.mean(0)
-    _, _, Vt_d = np.linalg.svd(op, full_matrices=False)
-    depth_secondary = Vt_d[1]
-    depth_secondary -= np.dot(depth_secondary, target_axis) * target_axis
-    depth_secondary /= np.linalg.norm(depth_secondary) + 1e-8
+    fb_norm = np.linalg.norm(fallback_dir)
+    fallback_dir = fallback_dir / fb_norm if fb_norm > 1e-8 else np.array([0.0, 0.0, -1.0])
 
-    # Secondary axis of canon mesh after R1.
-    canon_secondary = R1 @ Vt[1]
-    canon_secondary -= np.dot(canon_secondary, target_axis) * target_axis
-    canon_secondary /= np.linalg.norm(canon_secondary) + 1e-8
+    verts = obj_verts.copy()
+    step = max_push / max_iters
 
-    # Rodrigues rotation around target_axis to align secondary axes.
-    v2 = np.cross(canon_secondary, depth_secondary)
-    cos_a2 = float(np.clip(np.dot(canon_secondary, depth_secondary), -1, 1))
-    sin_a2 = np.dot(v2, target_axis)
-    angle2 = np.arctan2(sin_a2, cos_a2)
-    K2 = np.array([[0, -target_axis[2], target_axis[1]],
-                   [target_axis[2], 0, -target_axis[0]],
-                   [-target_axis[1], target_axis[0], 0]])
-    R2 = np.eye(3) + np.sin(angle2) * K2 + (1 - np.cos(angle2)) * K2 @ K2
+    try:
+        for _ in range(max_iters):
+            # Use proximity + surface normals instead of mesh.contains() so this
+            # works on the MANO mesh, which is open at the wrist (not watertight).
+            closest, _, tri_ids = trimesh.proximity.closest_point(hand_mesh, verts)
+            face_normals = hand_mesh.face_normals[tri_ids]
+            # Vector from nearest surface point to each object vertex.
+            surf_to_vert = verts - closest
+            # A vertex is inside the hand when it points opposite to the outward normal.
+            inside = (surf_to_vert * face_normals).sum(axis=1) < 0
 
-    R = R2 @ R1
+            if not inside.any():
+                return verts
 
-    # Enforce proper rotation.
-    U, _, Vt_r = np.linalg.svd(R)
-    R = U @ Vt_r
-    if np.linalg.det(R) < 0:
-        U[:, -1] *= -1
-        R = U @ Vt_r
+            # Push direction: average of (surface_point - inside_vertex), i.e. toward exit.
+            exit_vecs = closest[inside] - verts[inside]
+            direction = exit_vecs.mean(axis=0)
+            dir_norm = np.linalg.norm(direction)
+            direction = direction / dir_norm if dir_norm > 1e-8 else fallback_dir
 
-    return R.astype(np.float32)
-
-
-def _pca_rotation(obj_points: np.ndarray, canon_verts: np.ndarray) -> np.ndarray:
-    """Estimate a rotation that aligns TripoSR canonical axes to the depth point cloud.
-
-    Runs PCA on both the depth-lifted object point cloud and the canonical mesh,
-    then solves for the rotation mapping one set of principal axes to the other.
-    The camera-facing axis is forced to point toward the camera (+z in camera space).
-    """
-    def pca_axes(pts: np.ndarray) -> np.ndarray:
-        c = pts - pts.mean(0)
-        _, _, Vt = np.linalg.svd(c, full_matrices=False)
-        return Vt  # rows are principal axes, descending variance
-
-    depth_axes = pca_axes(obj_points)   # (3, 3) rows = axes in depth space
-    canon_axes = pca_axes(canon_verts)  # (3, 3) rows = axes in canonical space
-
-    # R maps canon frame to depth frame: depth_axes = R @ canon_axes
-    R = depth_axes.T @ canon_axes
-
-    # Enforce proper rotation (det = +1)
-    U, _, Vt = np.linalg.svd(R)
-    R = U @ Vt
-    if np.linalg.det(R) < 0:
-        U[:, -1] *= -1
-        R = U @ Vt
-
-    # Force the smallest-variance axis (surface normal) to face the camera (+z).
-    if R[2, 2] < 0:
-        R[:, 2] *= -1
-        R[:, 0] *= -1  # keep det = +1
-
-    return R.astype(np.float32)
+            verts = verts + step * direction
+        return verts
+    except Exception:
+        # Geometry-query failure: keep original placement.
+        return obj_verts
 
 
 def _consensus_pose(data: PipelineData) -> tuple[np.ndarray, np.ndarray]:

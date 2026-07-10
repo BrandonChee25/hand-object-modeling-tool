@@ -1,17 +1,38 @@
 # Core
 numpy
+opencv-python
 scipy
 Pillow
 trimesh
 pyyaml
---extra-index-url https://download.pytorch.org/whl/cu124
-torch==2.5.0+cu124
-torchvision==0.20.0+cu124
+transformers>=4.38.0
+# open3d — only needed for view_trajectory.py on your local machine (no Python 3.13 wheel)
+huggingface_hub[cli]
 
-# Model packages — install from source as noted in each wrapper
+# --- PyTorch: install ONE of these depending on your machine ---
+#
+# Local (Windows, CUDA 12.4):
+#   pip install torch==2.5.0+cu124 torchvision==0.20.0+cu124 \
+#       --index-url https://download.pytorch.org/whl/cu124
+#
+# Compute cluster (Linux, CUDA 12.6, required for SAM3):
+#   pip install torch==2.7.0 torchvision==0.22.0 \
+#       --index-url https://download.pytorch.org/whl/cu126
+
+# Model packages — install from source
 # WiLoR-mini: pip install git+https://github.com/warmshao/WiLoR-mini
 # SAM-2:      pip install git+https://github.com/facebookresearch/segment-anything-2
 # MoGe:       pip install git+https://github.com/microsoft/MoGe
 # TripoSR:    git clone https://github.com/VAST-AI-Research/TripoSR, add to PYTHONPATH,
-#             pip install omegaconf einops transformers huggingface-hub rembg xatlas moderngl PyMCubes
+#             pip install omegaconf einops rembg xatlas moderngl PyMCubes
 #             (torchmcubes replaced with PyMCubes — see TripoSR/tsr/models/isosurface.py)
+# pyrender:   pip install pyrender   (replaces open3d for headless mesh rendering in Stage 5)
+#             On cluster, set: export PYOPENGL_PLATFORM=egl
+# DINOv2:     auto-downloaded via torch.hub on first use (models/guided_diffusion.py)
+#
+# --- Compute cluster only (Python 3.12+, PyTorch 2.7+, CUDA 12.6+) ---
+# SAM3:       git clone https://github.com/facebookresearch/sam3 && pip install -e sam3/
+#             Accept gated weights at huggingface.co/facebook/sam3.1, then:
+#               huggingface-cli login
+#             Stage 3 switches to SAM3 automatically when installed.
+#             Set use_sam3: false in config to force SAM-2 instead.

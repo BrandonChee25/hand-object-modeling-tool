@@ -2,5 +2,9 @@
 checkpoints/
 __pycache__/
 *.pyc
-output/
+output*/
+out/
 frames/
+extra_frames/
+input/
+*.ipynb

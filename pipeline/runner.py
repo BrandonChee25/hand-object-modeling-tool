@@ -27,7 +27,7 @@ class PipelineRunner:
         self.s7 = ExportStage(cfg)
 
     def run(self, frames_dir: Path, output_dir: Path) -> Path:
-        data = PipelineData()
+        data = PipelineData(output_dir=output_dir)
 
         print("[1/7] Preprocessing frames...")
         data = self.s1.run(frames_dir, data)
@@ -35,13 +35,44 @@ class PipelineRunner:
         print(f"[2/7] Hand reconstruction ({len(data.frames)} frames)...")
         data = self.s2.run(data)
 
-        print("[3/7] Object segmentation (SAM-2)...")
+        print("[3/7] Object segmentation...")
         data = self.s3.run(data)
 
         print("[4/7] Blind object mesh generation (SAM-3D)...")
         data = self.s4.run(data)
 
-        print("[5/7] Object pose estimation (guided diffusion)...")
+        # Free memory from earlier stages before Stage 5's DINOv2 model loads.
+        import torch, gc
+        import models.wilor as _wilor_mod
+        import models.moge_wrapper, models.sam2_wrapper, models.sam3d_wrapper
+        try:
+            import models.sam3_seg_wrapper  # noqa: F401
+        except ImportError:
+            pass
+
+        # Clear module-level caches
+        _wilor_mod._pipeline_cache.clear()
+
+        # Move any loaded models to CPU then delete
+        for stage in [self.s1, self.s2, self.s3, self.s4]:
+            if stage is None:
+                continue
+            for val in vars(stage).values():
+                for attr in ('_model', '_predictor', '_auto_gen', '_video_predictor'):
+                    m = getattr(val, attr, None)
+                    if m is not None and hasattr(m, 'cpu'):
+                        m.cpu()
+                        setattr(val, attr, None)
+
+        self.s1 = None
+        self.s2 = None
+        self.s3 = None
+        self.s4 = None
+        gc.collect()
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+
+        print("[5/7] Object pose estimation (ICP registration)...")
         data = self.s5.run(data)
 
         print("[6/7] Hand-object metric alignment...")

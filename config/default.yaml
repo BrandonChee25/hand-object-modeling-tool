@@ -6,7 +6,7 @@ device: cuda
 # --- Model checkpoints (paths relative to repo root or absolute) ---
 wilor_checkpoint: checkpoints/wilor.pth
 moge_checkpoint: Ruicheng/moge-vitl
-sam2_checkpoint: checkpoints/sam2.1_hiera_large.pt
+sam2_checkpoint: /gscratch/scrubbed/bchee05/checkpoints/sam2.1_hiera_large.pt
 sam2_config: configs/sam2.1/sam2.1_hiera_l.yaml
 # sam3d_checkpoint unused — SAM-3D is not publicly released; TripoSR is used instead
 # (weights download automatically from HuggingFace: stabilityai/TripoSR)
@@ -15,18 +15,16 @@ sam2_config: configs/sam2.1/sam2.1_hiera_l.yaml
 hand_detection_confidence: 0.3   # minimum YOLO score to accept a hand bbox
 
 # --- Stage 3: Object segmentation ---
+# SAM3 is used automatically when installed (compute cluster); SAM-2 is used as fallback.
+# Set use_sam3: false to force SAM-2 even when SAM3 is present.
+use_sam3: true
+sam3_version: sam3.1   # facebook/sam3.1 on HuggingFace (or facebook/sam3 for v1)
+# object_point: [x, y] — manual pixel coordinate on the held object in the anchor frame.
+# Only needed if both SAM3 and the SAM-2 hand-box prompt fail to find the correct object.
 crop_padding_px: 32              # pixels to pad around the object crop
 hand_overlap_threshold: 0.30     # max fraction of a segment overlapping the hand
+detection_candidate_frames: 5   # how many frames to try the hand-box prompt on
 
 # --- Stage 6: Alignment ---
-grip_position: 0.6      # 0=palm centre, 1=fingertips; controls where object is centred on hand
-flip_object: false      # set true if the object appears upside-down in the output
-object_roll_degrees: 0  # rotate object around the hand long-axis (degrees); fine-tune orientation
-
-# --- Stage 5: Guided diffusion pose tracking ---
-n_pose_candidates: 25            # number of flow trajectories sampled per frame
-alpha_s: 0.95                    # shape anchoring strength (near 1 = rigid shape)
-alpha_p_range: [0.0, 0.6]        # [min, max] adaptive pose guidance weight
-cluster_threshold_deg: 15.0      # rotation tolerance for SE(3) candidate clustering
-cluster_threshold_m: 0.05        # translation tolerance (metres) for clustering
-n_diffusion_steps: 50            # flow-matching denoising steps per trajectory
+grip_position: 0.6        # 0=palm centre, 1=fingertips; where the object is initially placed
+max_contact_push_m: 0.10  # safety cap on how far the object can be pushed to clear the hand mesh
