@@ -8,3 +8,4 @@ frames/
 extra_frames/
 input/
 *.ipynb
+.vscode
