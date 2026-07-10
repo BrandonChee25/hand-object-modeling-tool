@@ -44,12 +44,14 @@ class SAM3SegModel:
         image: np.ndarray,
         hand_bbox: tuple[int, int, int, int],
         hand_mask: np.ndarray,
-        expand: float = 0.6,
+        expand: float = 0.3,
     ) -> np.ndarray | None:
         """Single-frame: find held object via expanded hand bbox visual prompt.
 
-        Converts the expanded hand bbox to SAM3's normalized cxcywh format,
-        then post-processes with largest-component + erosion (same as SAM2 path).
+        Converts the expanded hand bbox to SAM3's normalized cxcywh format.
+        Iterates SAM3 candidate masks in confidence order and returns the first
+        one that is mostly OUTSIDE the hand region — arm/body masks have high
+        overlap with the hand bbox and are skipped.
         """
         self._load()
         from PIL import Image as PILImage
@@ -67,8 +69,8 @@ class SAM3SegModel:
         ey2 = min(H, y2 + pad_y)
 
         # SAM3 box prompt: normalized cx, cy, w, h in [0, 1]
-        cx  = ((ex1 + ex2) / 2) / W
-        cy  = ((ey1 + ey2) / 2) / H
+        cx   = ((ex1 + ex2) / 2) / W
+        cy   = ((ey1 + ey2) / 2) / H
         bw_n = (ex2 - ex1) / W
         bh_n = (ey2 - ey1) / H
 
@@ -85,29 +87,42 @@ class SAM3SegModel:
 
         if hasattr(scores, "cpu"):
             scores = scores.cpu().float()
-        best = int(np.array(scores).argmax())
-        mask = masks[best]
-        if hasattr(mask, "cpu"):
-            mask = mask.cpu().numpy()
-        mask = np.array(mask).astype(bool)
-        while mask.ndim > 2:
-            mask = mask[0]
+        order = np.argsort(np.array(scores))[::-1]  # highest confidence first
 
-        # Strip hand pixels that leaked in.
-        mask = mask & ~hand_mask
+        for idx in order:
+            cand = masks[idx]
+            if hasattr(cand, "cpu"):
+                cand = cand.cpu().numpy()
+            cand = np.array(cand).astype(bool)
+            while cand.ndim > 2:
+                cand = cand[0]
+            if not cand.any():
+                continue
 
-        # Keep only the largest connected component.
-        labeled, n = _label(mask)
-        if n > 1:
-            sizes = np.array([(labeled == i).sum() for i in range(1, n + 1)])
-            mask = (labeled == (np.argmax(sizes) + 1)).astype(bool)
+            # Skip masks that are mostly inside the hand bbox — those are the
+            # hand/arm, not the held object.
+            inside_frac = float((cand & hand_mask).sum()) / float(cand.sum())
+            if inside_frac > 0.5:
+                continue
 
-        # Erode boundary noise.
-        eroded = binary_erosion(mask, iterations=3)
-        if eroded.any():
-            mask = eroded
+            # Strip hand bbox pixels and keep largest component.
+            cand = cand & ~hand_mask
+            if not cand.any():
+                continue
 
-        return mask if mask.any() else None
+            labeled, n = _label(cand)
+            if n > 1:
+                sizes = np.array([(labeled == i).sum() for i in range(1, n + 1)])
+                cand = (labeled == (np.argmax(sizes) + 1)).astype(bool)
+
+            eroded = binary_erosion(cand, iterations=3)
+            if eroded.any():
+                cand = eroded
+
+            if cand.any():
+                return cand
+
+        return None
 
     def propagate(
         self,

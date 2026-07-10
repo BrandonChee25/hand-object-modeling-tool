@@ -142,6 +142,21 @@ class ObjectSegmentationStage:
                 print(f"[s3] frame {fidx}: mask too large ({mask.sum()} px), skipping")
                 continue
 
+            # Reject if mask is tiny (noise / degenerate).
+            if mask.sum() < 200:
+                print(f"[s3] frame {fidx}: mask too small ({mask.sum()} px), skipping")
+                continue
+
+            # Reject if the mask centroid is inside the hand bbox — that means
+            # the model picked the hand/arm rather than the held object.
+            ys, xs = np.where(mask)
+            cy_m, cx_m = float(ys.mean()), float(xs.mean())
+            hx1, hy1, hx2, hy2 = frame.hand_bbox.astype(int)
+            if hy1 <= cy_m <= hy2 and hx1 <= cx_m <= hx2:
+                print(f"[s3] frame {fidx}: mask centroid inside hand bbox "
+                      f"({cx_m:.0f},{cy_m:.0f}), skipping")
+                continue
+
             # Reject if mask depth is far from hand depth.
             if depth is not None and hand_depth is not None:
                 mask_depth = _median_depth(depth, mask)
