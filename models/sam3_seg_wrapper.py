@@ -84,6 +84,7 @@ class SAM3SegModel:
 
         pil = PILImage.fromarray(image)
         state = self._processor.set_image(pil)
+        state = self._processor.set_text_prompt("held object", state)
         state = self._processor.add_geometric_prompt(
             box=[cx, cy, bw_n, bh_n], label=True, state=state
         )
