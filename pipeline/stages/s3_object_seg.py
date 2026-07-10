@@ -60,18 +60,17 @@ def _grip_direction_points(
 ) -> list[tuple[int, int]]:
     """Return candidate (x, y) pixel coordinates beyond each end of the hand.
 
-    Returns BOTH the computed grip direction AND its opposite.  The caller
-    picks whichever lands at a depth similar to the hand (the arm extends
-    away from camera = deeper; the held object stays at hand depth).
+    Uses keypoints_3d (camera space) to compute the wrist→fingertip direction,
+    then returns a point one hand-length beyond the fingertips AND one in the
+    opposite direction.  The caller picks whichever is not the arm.
     """
-    vertices = hand_result.vertices   # (778, 3) MANO local space
-    R        = hand_result.global_rot # (3, 3)  local → camera
+    kp = hand_result.keypoints_3d  # (21, 3) camera space
+    # MANO joint convention: 0=wrist, 4/8/12/16/20=fingertips
+    wrist_cam = kp[0]
+    tips_cam  = kp[[4, 8, 12, 16, 20]].mean(0)
+    grip_cam  = tips_cam - wrist_cam  # wrist → fingertips in camera space
 
-    hand_center_local  = vertices.mean(0)
-    tip_centroid_local = vertices[_FINGERTIP_VERT_IDX].mean(0)
-    grip_local = tip_centroid_local - hand_center_local
-
-    grip_cam = R @ grip_local
+    # Project to image xy (camera x=right, y=down matches image convention).
     direction_2d = np.array([grip_cam[0], grip_cam[1]])
     d_norm = float(np.linalg.norm(direction_2d))
     if d_norm < 1e-6:
@@ -195,6 +194,17 @@ class ObjectSegmentationStage:
 
             # --- attempt 1: SAM-2 point prompt at each candidate location ---
             for tip_point in tip_points:
+                # Check the depth at the probe pixel before calling SAM-2 —
+                # avoids wasting a segmentation call on a point that's clearly
+                # on the arm (depth much greater than hand).
+                if depth is not None and hand_depth is not None:
+                    px, py = tip_point
+                    if 0 <= py < depth.shape[0] and 0 <= px < depth.shape[1]:
+                        pt_depth = float(depth[py, px])
+                        if pt_depth > hand_depth * 1.5:
+                            print(f"[s3] frame {fidx}: point {tip_point} depth "
+                                  f"{pt_depth:.2f}m > hand {hand_depth:.2f}m, skipping")
+                            continue
                 print(f"[s3] frame {fidx}: trying SAM-2 point prompt at {tip_point}")
                 mask = self._fallback_sam2.segment_with_point(frame.image, tip_point)
                 if mask is not None and mask.any():
@@ -250,7 +260,7 @@ class ObjectSegmentationStage:
             return False
         if depth is not None and hand_depth is not None:
             md = _median_depth(depth, mask)
-            if md is not None and md > hand_depth * 1.2:
+            if md is not None and md > hand_depth * 1.5:
                 print(f"[s3] frame {fidx} {label}: mask depth {md:.2f}m > hand {hand_depth:.2f}m, likely arm")
                 return False
         print(f"[s3] frame {fidx} {label}: accepted ({n} px)")
