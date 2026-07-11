@@ -213,17 +213,14 @@ class ObjectSegmentationStage:
                     min(W - 1, tip_point[0] + half),
                     min(H - 1, tip_point[1] + half),
                 )
-                print(f"[s3] frame {fidx}: trying SAM-2 box prompt {box} "
-                      f"({box[2]-box[0]}×{box[3]-box[1]}px)")
-                mask = self._fallback_sam2.segment_with_box(frame.image, box)
+                print(f"[s3] frame {fidx}: trying SAM-2 box+point prompt {box} "
+                      f"({box[2]-box[0]}×{box[3]-box[1]}px) anchored at {tip_point}")
+                mask = self._fallback_sam2.segment_with_box_and_point(
+                    frame.image, box, tip_point
+                )
                 if mask is not None and mask.any():
-                    # Expand the hand exclusion zone by ~10px to sever any thin
-                    # connection between the hand bbox edge and clothing/pants
-                    # that happens to touch the bbox boundary.
-                    exclusion = binary_dilation(hand_mask, iterations=10)
-                    mask = mask & ~exclusion
-                    mask = _nearest_component(mask, tip_point)
-                    if self._valid_object_mask(mask, max_pixels, depth, hand_depth, fidx, "SAM-2 box"):
+                    mask = mask & ~hand_mask
+                    if self._valid_object_mask(mask, max_pixels, depth, hand_depth, fidx, "SAM-2 box+point"):
                         return fidx, mask
 
             # --- attempt 2: SAM3 text + box prompt at each candidate location ---

@@ -69,6 +69,30 @@ class SAM2Model:
         best = int(np.argmax(scores))
         return masks[best].astype(bool)
 
+    def segment_with_box_and_point(
+        self,
+        image: np.ndarray,
+        box_xyxy: tuple[int, int, int, int],
+        point_xy: tuple[int, int],
+    ) -> np.ndarray:
+        """SAM-2 mask inside box, anchored to a positive foreground point.
+
+        The positive point biases SAM-2 toward whatever segment contains
+        point_xy, preventing the mask from drifting to other objects in the box.
+        """
+        self._load()
+        self._predictor.set_image(image)
+        x1, y1, x2, y2 = box_xyxy
+        px, py = point_xy
+        masks, scores, _ = self._predictor.predict(
+            point_coords=np.array([[px, py]]),
+            point_labels=np.array([1]),   # foreground
+            box=np.array([[x1, y1, x2, y2]], dtype=float),
+            multimask_output=True,
+        )
+        best = int(np.argmax(scores))
+        return masks[best].astype(bool)
+
     def segment_held_object(
         self,
         image: np.ndarray,
