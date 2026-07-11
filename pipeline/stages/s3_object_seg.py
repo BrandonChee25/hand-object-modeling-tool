@@ -294,7 +294,32 @@ class ObjectSegmentationStage:
             r    = int(hand_size * 0.55)
             half = int(hand_size * 0.7)
 
-            # --- attempt 1: SAM-2 box+point prompt around fingertip location ---
+            # --- attempt 1: SAM3 text "held object" + fingertip-centroid box ---
+            # SAM3's joint text+segmentation understanding avoids selecting body
+            # pixels even when the probe box overlaps body.  The MANO silhouette
+            # hand_mask (already computed above) is passed so SAM3 filters out
+            # any candidate mask that is mostly the hand.
+            bbox_hints = [
+                (
+                    max(0, tip_point[0] - r), max(0, tip_point[1] - r),
+                    min(W - 1, tip_point[0] + r), min(H - 1, tip_point[1] + r),
+                )
+                for tip_point in tip_points
+            ] or [None]
+
+            for bbox_hint in bbox_hints:
+                print(f"[s3] frame {fidx}: trying SAM3 text+box {bbox_hint or '(expanded hand bbox)'}")
+                mask = self.seg_model.segment_held_object(
+                    frame.image,
+                    tuple(frame.hand_bbox.astype(int)),
+                    hand_mask,
+                    object_bbox_hint=bbox_hint,
+                )
+                if mask is not None and mask.any():
+                    if self._valid_object_mask(mask, max_pixels, depth, hand_depth, fidx, "SAM3"):
+                        return fidx, mask
+
+            # --- attempt 2: SAM-2 box+point prompt (fallback) ---
             for tip_point in tip_points:
                 if depth is not None and hand_depth is not None:
                     px, py = tip_point
@@ -319,27 +344,6 @@ class ObjectSegmentationStage:
                     mask = mask & ~hand_mask
                     mask = _nearest_component(mask, tip_point)
                     if self._valid_object_mask(mask, max_pixels, depth, hand_depth, fidx, "SAM-2 box+point"):
-                        return fidx, mask
-
-            # --- attempt 2: SAM3 text + box prompt ---
-            bbox_hints = [
-                (
-                    max(0, tip_point[0] - r), max(0, tip_point[1] - r),
-                    min(W - 1, tip_point[0] + r), min(H - 1, tip_point[1] + r),
-                )
-                for tip_point in tip_points
-            ] or [None]
-
-            for bbox_hint in bbox_hints:
-                print(f"[s3] frame {fidx}: trying SAM3 box {bbox_hint or '(expanded hand bbox)'}")
-                mask = self.seg_model.segment_held_object(
-                    frame.image,
-                    tuple(frame.hand_bbox.astype(int)),
-                    hand_mask,
-                    object_bbox_hint=bbox_hint,
-                )
-                if mask is not None and mask.any():
-                    if self._valid_object_mask(mask, max_pixels, depth, hand_depth, fidx, "SAM3 box"):
                         return fidx, mask
 
         print("[s3] all prompted attempts failed — using contact heuristic")
