@@ -53,6 +53,56 @@ def _load_seg_model(cfg: dict):
     return model, "sam2"
 
 
+def _mano_silhouette_mask(
+    hand_result,
+    hand_bbox_px: np.ndarray,
+    H: int,
+    W: int,
+    dilation: int = 10,
+) -> np.ndarray | None:
+    """Orthographic projection of MANO mesh vertices → filled convex-hull mask.
+
+    Uses the detected hand bbox as the scale reference so the result is
+    correctly positioned and sized regardless of camera K or Y-axis convention.
+    The orthographic approximation is accurate enough for hands (all vertices
+    at roughly the same depth).
+    """
+    import cv2
+
+    verts = hand_result.vertices  # (778, 3)
+    center = verts.mean(0)
+    c = verts - center  # centred at 3D centroid
+
+    hx1, hy1, hx2, hy2 = hand_bbox_px.astype(float)
+    bbox_cx = (hx1 + hx2) / 2.0
+    bbox_cy = (hy1 + hy2) / 2.0
+    bbox_w  = hx2 - hx1
+    bbox_h  = hy2 - hy1
+
+    x_range = float(c[:, 0].ptp())
+    y_range = float(c[:, 1].ptp())
+    if x_range < 1e-6 or y_range < 1e-6:
+        return None
+
+    # Scale 3D X/Y extents to match 2D bbox dimensions.
+    sx = bbox_w / x_range
+    sy = bbox_h / y_range
+
+    us = np.clip((c[:, 0] * sx + bbox_cx).astype(int), 0, W - 1)
+    vs = np.clip((c[:, 1] * sy + bbox_cy).astype(int), 0, H - 1)
+
+    pts = np.stack([us, vs], axis=1).astype(np.int32)
+    hull = cv2.convexHull(pts)
+
+    mask = np.zeros((H, W), dtype=np.uint8)
+    cv2.fillPoly(mask, [hull], 1)
+
+    silhouette = mask.astype(bool)
+    if dilation > 0:
+        silhouette = binary_dilation(silhouette, iterations=dilation)
+    return silhouette
+
+
 def _projected_fingertip_probe(
     hand_result,
     K: np.ndarray,
@@ -137,10 +187,10 @@ class ObjectSegmentationStage:
     def run(self, data: PipelineData) -> PipelineData:
         output_dir = data.output_dir or Path("output")
         object_point = self.cfg.get("object_point")
+        hand_results_map = {r.frame_index: r for r in data.hand_results}
 
         if object_point is not None:
             anchor_frame = data.frames[data.anchor_index]
-            # Point prompt is SAM-2 only; use the fallback SAM2 regardless of primary model.
             seed_mask = self._fallback_sam2.segment_with_point(
                 anchor_frame.image, tuple(object_point)
             )
@@ -150,7 +200,7 @@ class ObjectSegmentationStage:
             seed_index, seed_mask = self._find_held_object(data)
 
         seed_frame = data.frames[seed_index]
-        hand_mask = self._hand_mask(seed_frame)
+        hand_mask = self._hand_mask_for(seed_frame, hand_results_map.get(seed_index))
         _save_debug_mask(seed_frame.image, hand_mask, seed_mask, output_dir)
 
         all_images = [f.image for f in data.frames]
@@ -175,6 +225,7 @@ class ObjectSegmentationStage:
         return sorted(set(indices + [data.anchor_index]))
 
     def _hand_mask(self, frame) -> np.ndarray:
+        """Bbox-rectangle hand mask (fast fallback)."""
         H, W = frame.image.shape[:2]
         mask = np.zeros((H, W), dtype=bool)
         if frame.hand_bbox is not None:
@@ -182,14 +233,28 @@ class ObjectSegmentationStage:
             mask[max(0, y1):min(H, y2), max(0, x1):min(W, x2)] = True
         return mask
 
+    def _hand_mask_for(self, frame, hand_result=None) -> np.ndarray:
+        """MANO silhouette mask when available, otherwise bbox rectangle."""
+        if hand_result is not None and frame.hand_bbox is not None:
+            H, W = frame.image.shape[:2]
+            try:
+                m = _mano_silhouette_mask(hand_result, frame.hand_bbox, H, W)
+                if m is not None:
+                    return m
+            except Exception as e:
+                print(f"[s3] MANO silhouette failed ({e}), falling back to bbox")
+        return self._hand_mask(frame)
+
     def _find_held_object(self, data: PipelineData) -> tuple[int, np.ndarray]:
         """Find the held object seed mask.
 
         Priority order per candidate frame:
-          1. SAM-2 box prompt around fingertip-projected location (hard-constrains the region
-             so the mask cannot grow out to the arm or body).
+          1. SAM-2 box+point prompt around fingertip-projected location.
           2. SAM3 text + box prompt at the same location (fallback).
-          3. SAM-2 auto-segment contact heuristic (final fallback across all frames).
+          3. SAM-2 auto-segment contact heuristic (final fallback).
+
+        All steps use a tight MANO silhouette mask (not the bbox rectangle)
+        to exclude the hand, so object pixels inside the bbox are preserved.
         """
         frames = data.frames
         indices = self._candidate_indices(data)
@@ -197,17 +262,18 @@ class ObjectSegmentationStage:
         max_pixels = 0.30 * H * W
 
         hand_results = {r.frame_index: r for r in data.hand_results}
-        K = data.camera_intrinsics  # may be None if not computed yet
+        K = data.camera_intrinsics
 
         for fidx in indices:
             frame = frames[fidx]
             if frame.hand_bbox is None:
                 continue
-            hand_mask = self._hand_mask(frame)
+
+            hr        = hand_results.get(fidx)
+            hand_mask = self._hand_mask_for(frame, hr)
             depth     = data.depth_maps.get(fidx, data.depth_map)
             hand_depth = _median_depth(depth, hand_mask)
 
-            hr = hand_results.get(fidx)
             tip_points: list[tuple[int, int]] = []
             if hr is not None:
                 if K is not None:
@@ -225,14 +291,11 @@ class ObjectSegmentationStage:
 
             hx1, hy1, hx2, hy2 = frame.hand_bbox.astype(float)
             hand_size = max(hx2 - hx1, hy2 - hy1)
-            r = int(hand_size * 0.55)
-
-            # --- attempt 1: SAM-2 box prompt around each candidate location ---
-            # A box prompt (not point) constrains SAM-2 to a small region so it
-            # cannot grow the mask out to the whole arm or body.
+            r    = int(hand_size * 0.55)
             half = int(hand_size * 0.7)
+
+            # --- attempt 1: SAM-2 box+point prompt around fingertip location ---
             for tip_point in tip_points:
-                # Pre-check: pixel depth at probe must be within 1.5× hand depth.
                 if depth is not None and hand_depth is not None:
                     px, py = tip_point
                     if 0 <= py < depth.shape[0] and 0 <= px < depth.shape[1]:
@@ -247,28 +310,28 @@ class ObjectSegmentationStage:
                     min(W - 1, tip_point[0] + half),
                     min(H - 1, tip_point[1] + half),
                 )
-                print(f"[s3] frame {fidx}: trying SAM-2 box+point prompt {box} "
+                print(f"[s3] frame {fidx}: trying SAM-2 box+point {box} "
                       f"({box[2]-box[0]}×{box[3]-box[1]}px) anchored at {tip_point}")
                 mask = self._fallback_sam2.segment_with_box_and_point(
                     frame.image, box, tip_point
                 )
                 if mask is not None and mask.any():
                     mask = mask & ~hand_mask
+                    mask = _nearest_component(mask, tip_point)
                     if self._valid_object_mask(mask, max_pixels, depth, hand_depth, fidx, "SAM-2 box+point"):
                         return fidx, mask
 
-            # --- attempt 2: SAM3 text + box prompt at each candidate location ---
-            bbox_hints = []
-            for tip_point in tip_points:
-                bbox_hints.append((
+            # --- attempt 2: SAM3 text + box prompt ---
+            bbox_hints = [
+                (
                     max(0, tip_point[0] - r), max(0, tip_point[1] - r),
                     min(W - 1, tip_point[0] + r), min(H - 1, tip_point[1] + r),
-                ))
-            if not bbox_hints:
-                bbox_hints = [None]  # fall back to expanded hand bbox
+                )
+                for tip_point in tip_points
+            ] or [None]
 
             for bbox_hint in bbox_hints:
-                print(f"[s3] frame {fidx}: trying SAM3 box prompt {bbox_hint or '(expanded hand bbox)'}")
+                print(f"[s3] frame {fidx}: trying SAM3 box {bbox_hint or '(expanded hand bbox)'}")
                 mask = self.seg_model.segment_held_object(
                     frame.image,
                     tuple(frame.hand_bbox.astype(int)),
@@ -281,7 +344,8 @@ class ObjectSegmentationStage:
 
         print("[s3] all prompted attempts failed — using contact heuristic")
         anchor_frame = frames[data.anchor_index]
-        hand_mask    = self._hand_mask(anchor_frame)
+        anchor_hr    = hand_results.get(data.anchor_index)
+        hand_mask    = self._hand_mask_for(anchor_frame, anchor_hr)
         depth        = data.depth_maps.get(data.anchor_index, data.depth_map)
         return data.anchor_index, self._seed_mask(anchor_frame.image, hand_mask, depth_map=depth)
 
