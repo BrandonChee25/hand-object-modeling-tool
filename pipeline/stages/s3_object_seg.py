@@ -161,8 +161,9 @@ class ObjectSegmentationStage:
         """Find the held object seed mask.
 
         Priority order per candidate frame:
-          1. SAM-2 point prompt at the fingertip-projected location (most targeted).
-          2. SAM3 text + box prompt at the same location (fallback if point hits background).
+          1. SAM-2 box prompt around fingertip-projected location (hard-constrains the region
+             so the mask cannot grow out to the arm or body).
+          2. SAM3 text + box prompt at the same location (fallback).
           3. SAM-2 auto-segment contact heuristic (final fallback across all frames).
         """
         frames = data.frames
@@ -192,11 +193,12 @@ class ObjectSegmentationStage:
             hand_size = max(hx2 - hx1, hy2 - hy1)
             r = int(hand_size * 0.55)
 
-            # --- attempt 1: SAM-2 point prompt at each candidate location ---
+            # --- attempt 1: SAM-2 box prompt around each candidate location ---
+            # A box prompt (not point) constrains SAM-2 to a small region so it
+            # cannot grow the mask out to the whole arm or body.
+            half = int(hand_size * 0.7)
             for tip_point in tip_points:
-                # Check the depth at the probe pixel before calling SAM-2 —
-                # avoids wasting a segmentation call on a point that's clearly
-                # on the arm (depth much greater than hand).
+                # Pre-check: pixel depth at probe must be within 1.5× hand depth.
                 if depth is not None and hand_depth is not None:
                     px, py = tip_point
                     if 0 <= py < depth.shape[0] and 0 <= px < depth.shape[1]:
@@ -205,11 +207,18 @@ class ObjectSegmentationStage:
                             print(f"[s3] frame {fidx}: point {tip_point} depth "
                                   f"{pt_depth:.2f}m > hand {hand_depth:.2f}m, skipping")
                             continue
-                print(f"[s3] frame {fidx}: trying SAM-2 point prompt at {tip_point}")
-                mask = self._fallback_sam2.segment_with_point(frame.image, tip_point)
+                box = (
+                    max(0, tip_point[0] - half),
+                    max(0, tip_point[1] - half),
+                    min(W - 1, tip_point[0] + half),
+                    min(H - 1, tip_point[1] + half),
+                )
+                print(f"[s3] frame {fidx}: trying SAM-2 box prompt {box} "
+                      f"({box[2]-box[0]}×{box[3]-box[1]}px)")
+                mask = self._fallback_sam2.segment_with_box(frame.image, box)
                 if mask is not None and mask.any():
                     mask = mask & ~hand_mask
-                    if self._valid_object_mask(mask, max_pixels, depth, hand_depth, fidx, "SAM-2 point"):
+                    if self._valid_object_mask(mask, max_pixels, depth, hand_depth, fidx, "SAM-2 box"):
                         return fidx, mask
 
             # --- attempt 2: SAM3 text + box prompt at each candidate location ---
