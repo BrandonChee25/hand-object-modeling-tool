@@ -217,7 +217,12 @@ class ObjectSegmentationStage:
                       f"({box[2]-box[0]}×{box[3]-box[1]}px)")
                 mask = self._fallback_sam2.segment_with_box(frame.image, box)
                 if mask is not None and mask.any():
-                    mask = mask & ~hand_mask
+                    # Expand the hand exclusion zone by ~10px to sever any thin
+                    # connection between the hand bbox edge and clothing/pants
+                    # that happens to touch the bbox boundary.
+                    exclusion = binary_dilation(hand_mask, iterations=10)
+                    mask = mask & ~exclusion
+                    mask = _nearest_component(mask, tip_point)
                     if self._valid_object_mask(mask, max_pixels, depth, hand_depth, fidx, "SAM-2 box"):
                         return fidx, mask
 
@@ -329,6 +334,23 @@ class ObjectSegmentationStage:
             )
         )
         return candidates[0][2]
+
+
+def _nearest_component(mask: np.ndarray, probe: tuple[int, int]) -> np.ndarray:
+    """Keep only the connected component whose closest pixel is nearest probe (x, y)."""
+    from scipy.ndimage import label as _label
+    labeled, n = _label(mask)
+    if n <= 1:
+        return mask
+    px, py = probe
+    best_id, best_dist = 1, float("inf")
+    for cid in range(1, n + 1):
+        ys, xs = np.where(labeled == cid)
+        d = float(np.sqrt((xs - px) ** 2 + (ys - py) ** 2).min())
+        if d < best_dist:
+            best_dist = d
+            best_id = cid
+    return (labeled == best_id).astype(bool)
 
 
 def _median_depth(
