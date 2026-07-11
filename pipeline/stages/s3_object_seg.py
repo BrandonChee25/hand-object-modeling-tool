@@ -53,24 +53,49 @@ def _load_seg_model(cfg: dict):
     return model, "sam2"
 
 
+def _projected_fingertip_probe(
+    hand_result,
+    K: np.ndarray,
+    H: int,
+    W: int,
+) -> tuple[int, int] | None:
+    """Project MANO fingertip joints (camera space) to a single 2D pixel probe.
+
+    When a hand grips an object, the fingertips cluster around it, so their
+    projected centroid lands on or very near the object — much more accurate
+    than the geometric hand_center + direction heuristic.
+    """
+    tips_3d = hand_result.keypoints_3d[[4, 8, 12, 16, 20]]  # (5, 3)
+    fx, fy = float(K[0, 0]), float(K[1, 1])
+    cx, cy = float(K[0, 2]), float(K[1, 2])
+    pts = []
+    for pt in tips_3d:
+        X, Y, Z = float(pt[0]), float(pt[1]), float(pt[2])
+        if Z <= 0:
+            continue
+        u = int(np.clip(fx * X / Z + cx, 0, W - 1))
+        v = int(np.clip(fy * Y / Z + cy, 0, H - 1))
+        pts.append((u, v))
+    if not pts:
+        return None
+    mu = int(np.mean([p[0] for p in pts]))
+    mv = int(np.mean([p[1] for p in pts]))
+    print(f"[s3] projected fingertip centroid: ({mu}, {mv})  "
+          f"(individual: {pts})")
+    return (mu, mv)
+
+
 def _grip_direction_points(
     hand_result,
     hand_bbox_px: np.ndarray,
     image_shape: tuple[int, int],
 ) -> list[tuple[int, int]]:
-    """Return candidate (x, y) pixel coordinates beyond each end of the hand.
-
-    Uses keypoints_3d (camera space) to compute the wrist→fingertip direction,
-    then returns a point one hand-length beyond the fingertips AND one in the
-    opposite direction.  The caller picks whichever is not the arm.
-    """
+    """Fallback: wrist→fingertip direction, probing both sides of the hand."""
     kp = hand_result.keypoints_3d  # (21, 3) camera space
-    # MANO joint convention: 0=wrist, 4/8/12/16/20=fingertips
     wrist_cam = kp[0]
     tips_cam  = kp[[4, 8, 12, 16, 20]].mean(0)
-    grip_cam  = tips_cam - wrist_cam  # wrist → fingertips in camera space
+    grip_cam  = tips_cam - wrist_cam
 
-    # Project to image xy (camera x=right, y=down matches image convention).
     direction_2d = np.array([grip_cam[0], grip_cam[1]])
     d_norm = float(np.linalg.norm(direction_2d))
     if d_norm < 1e-6:
@@ -172,6 +197,7 @@ class ObjectSegmentationStage:
         max_pixels = 0.30 * H * W
 
         hand_results = {r.frame_index: r for r in data.hand_results}
+        K = data.camera_intrinsics  # may be None if not computed yet
 
         for fidx in indices:
             frame = frames[fidx]
@@ -184,10 +210,18 @@ class ObjectSegmentationStage:
             hr = hand_results.get(fidx)
             tip_points: list[tuple[int, int]] = []
             if hr is not None:
-                try:
-                    tip_points = _grip_direction_points(hr, frame.hand_bbox, (H, W))
-                except Exception:
-                    pass
+                if K is not None:
+                    try:
+                        p = _projected_fingertip_probe(hr, K, H, W)
+                        if p is not None:
+                            tip_points = [p]
+                    except Exception as e:
+                        print(f"[s3] K-projection failed: {e}")
+                if not tip_points:
+                    try:
+                        tip_points = _grip_direction_points(hr, frame.hand_bbox, (H, W))
+                    except Exception:
+                        pass
 
             hx1, hy1, hx2, hy2 = frame.hand_bbox.astype(float)
             hand_size = max(hx2 - hx1, hy2 - hy1)
