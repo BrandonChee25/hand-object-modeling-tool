@@ -79,8 +79,8 @@ def _mano_silhouette_mask(
     bbox_w  = hx2 - hx1
     bbox_h  = hy2 - hy1
 
-    x_range = float(c[:, 0].ptp())
-    y_range = float(c[:, 1].ptp())
+    x_range = float(c[:, 0].max() - c[:, 0].min())
+    y_range = float(c[:, 1].max() - c[:, 1].min())
     if x_range < 1e-6 or y_range < 1e-6:
         return None
 
