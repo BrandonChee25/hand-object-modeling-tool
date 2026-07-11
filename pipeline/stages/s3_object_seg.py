@@ -294,11 +294,30 @@ class ObjectSegmentationStage:
             r    = int(hand_size * 0.55)
             half = int(hand_size * 0.7)
 
-            # --- attempt 1: SAM3 text "held object" + fingertip-centroid box ---
-            # SAM3's joint text+segmentation understanding avoids selecting body
-            # pixels even when the probe box overlaps body.  The MANO silhouette
-            # hand_mask (already computed above) is passed so SAM3 filters out
-            # any candidate mask that is mostly the hand.
+            # --- attempt 1: depth-band isolation ---
+            # The hand is in the foreground; the body is farther away.
+            # Pixels at hand_depth ± 25% are foreground (hand + object).
+            # After removing the MANO silhouette, what remains should be
+            # the object — no SAM call needed, no body leakage.
+            if depth is not None and hand_depth is not None and tip_points:
+                depth_lo = hand_depth * 0.75
+                depth_hi = hand_depth * 1.25
+                foreground = (
+                    np.isfinite(depth)
+                    & (depth >= depth_lo)
+                    & (depth <= depth_hi)
+                )
+                candidates = foreground & ~hand_mask
+                if candidates.any():
+                    obj = _nearest_component(candidates, tip_points[0])
+                    print(f"[s3] frame {fidx}: depth-band foreground "
+                          f"[{depth_lo:.2f}, {depth_hi:.2f}]m → "
+                          f"{int(candidates.sum())} px candidates, "
+                          f"{int(obj.sum())} px nearest component")
+                    if self._valid_object_mask(obj, max_pixels, depth, hand_depth, fidx, "depth-band"):
+                        return fidx, obj
+
+            # --- attempt 2: SAM3 text+box (SAM fallback) ---
             bbox_hints = [
                 (
                     max(0, tip_point[0] - r), max(0, tip_point[1] - r),
@@ -319,7 +338,7 @@ class ObjectSegmentationStage:
                     if self._valid_object_mask(mask, max_pixels, depth, hand_depth, fidx, "SAM3"):
                         return fidx, mask
 
-            # --- attempt 2: SAM-2 box+point prompt (fallback) ---
+            # --- attempt 3: SAM-2 box+point prompt (final SAM fallback) ---
             for tip_point in tip_points:
                 if depth is not None and hand_depth is not None:
                     px, py = tip_point
