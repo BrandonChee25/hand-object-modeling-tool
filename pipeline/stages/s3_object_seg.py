@@ -21,7 +21,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-from scipy.ndimage import binary_dilation
+from scipy.ndimage import binary_dilation, binary_erosion
 
 from pipeline.data import ObjectSegmentation, PipelineData
 
@@ -58,14 +58,17 @@ def _mano_silhouette_mask(
     hand_bbox_px: np.ndarray,
     H: int,
     W: int,
-    dilation: int = 10,
+    erosion: int = 15,
 ) -> np.ndarray | None:
     """Orthographic projection of MANO mesh vertices → filled convex-hull mask.
 
     Uses the detected hand bbox as the scale reference so the result is
     correctly positioned and sized regardless of camera K or Y-axis convention.
-    The orthographic approximation is accurate enough for hands (all vertices
-    at roughly the same depth).
+
+    erosion > 0 shrinks the filled hull inward so object pixels near the
+    fingertip/palm edges are not mistakenly excluded.  The convex hull alone
+    is already conservative (it fills the concave gaps between fingers), so
+    eroding it gives a tighter exclusion that covers only the solid hand core.
     """
     import cv2
 
@@ -84,7 +87,6 @@ def _mano_silhouette_mask(
     if x_range < 1e-6 or y_range < 1e-6:
         return None
 
-    # Scale 3D X/Y extents to match 2D bbox dimensions.
     sx = bbox_w / x_range
     sy = bbox_h / y_range
 
@@ -98,8 +100,8 @@ def _mano_silhouette_mask(
     cv2.fillPoly(mask, [hull], 1)
 
     silhouette = mask.astype(bool)
-    if dilation > 0:
-        silhouette = binary_dilation(silhouette, iterations=dilation)
+    if erosion > 0:
+        silhouette = binary_erosion(silhouette, iterations=erosion)
     return silhouette
 
 
