@@ -313,7 +313,10 @@ class ObjectSegmentationStage:
                 mask = self._fallback_sam2.segment_with_box(frame.image, box)
                 if mask is not None and mask.any():
                     mask = mask & ~hand_mask
-                    mask = _nearest_component(mask, tip_point)
+                    if depth is not None and hand_depth is not None:
+                        mask = _closest_depth_component(mask, depth, hand_depth, tip_point)
+                    else:
+                        mask = _nearest_component(mask, tip_point)
                     if self._valid_object_mask(mask, max_pixels, depth, hand_depth, fidx, "SAM-2 box"):
                         return fidx, mask
 
@@ -460,6 +463,39 @@ def _nearest_component(mask: np.ndarray, probe: tuple[int, int]) -> np.ndarray:
         if d < best_dist:
             best_dist = d
             best_id = cid
+    return (labeled == best_id).astype(bool)
+
+
+def _closest_depth_component(
+    mask: np.ndarray,
+    depth: np.ndarray,
+    hand_depth: float,
+    probe: tuple[int, int],
+) -> np.ndarray:
+    """Pick the component whose median depth is closest to hand_depth.
+
+    The held object is at the same foreground depth as the hand.  Body parts
+    (pants, arm) that sneak into the mask are usually at a slightly different
+    depth.  Falls back to nearest-to-probe if all components have identical
+    depth scores.
+    """
+    from scipy.ndimage import label as _label
+    labeled, n = _label(mask)
+    if n <= 1:
+        return mask
+
+    best_id, best_score = 1, float("inf")
+    for cid in range(1, n + 1):
+        comp = labeled == cid
+        vals = depth[comp]
+        vals = vals[np.isfinite(vals) & (vals > 0)]
+        if len(vals) == 0:
+            continue
+        score = abs(float(np.median(vals)) - hand_depth)
+        if score < best_score:
+            best_score = score
+            best_id = cid
+
     return (labeled == best_id).astype(bool)
 
 
