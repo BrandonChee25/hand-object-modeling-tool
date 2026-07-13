@@ -338,31 +338,25 @@ class ObjectSegmentationStage:
                     if self._valid_object_mask(mask, max_pixels, depth, hand_depth, fidx, "SAM3"):
                         return fidx, mask
 
-            # --- attempt 3: SAM-2 box+point prompt (final SAM fallback) ---
+            # --- attempt 3: SAM-2 box prompt (no positive point anchor) ---
+            # No positive point so SAM-2 is not steered toward body pixels.
+            # The MANO silhouette hand_mask (tight, not bbox rectangle) severs
+            # the pants-to-object connection that the old bbox rectangle left
+            # intact, so _nearest_component can isolate just the object.
             for tip_point in tip_points:
-                if depth is not None and hand_depth is not None:
-                    px, py = tip_point
-                    if 0 <= py < depth.shape[0] and 0 <= px < depth.shape[1]:
-                        pt_depth = float(depth[py, px])
-                        if pt_depth > hand_depth * 1.5:
-                            print(f"[s3] frame {fidx}: point {tip_point} depth "
-                                  f"{pt_depth:.2f}m > hand {hand_depth:.2f}m, skipping")
-                            continue
                 box = (
                     max(0, tip_point[0] - half),
                     max(0, tip_point[1] - half),
                     min(W - 1, tip_point[0] + half),
                     min(H - 1, tip_point[1] + half),
                 )
-                print(f"[s3] frame {fidx}: trying SAM-2 box+point {box} "
-                      f"({box[2]-box[0]}×{box[3]-box[1]}px) anchored at {tip_point}")
-                mask = self._fallback_sam2.segment_with_box_and_point(
-                    frame.image, box, tip_point
-                )
+                print(f"[s3] frame {fidx}: trying SAM-2 box {box} "
+                      f"({box[2]-box[0]}×{box[3]-box[1]}px)")
+                mask = self._fallback_sam2.segment_with_box(frame.image, box)
                 if mask is not None and mask.any():
                     mask = mask & ~hand_mask
                     mask = _nearest_component(mask, tip_point)
-                    if self._valid_object_mask(mask, max_pixels, depth, hand_depth, fidx, "SAM-2 box+point"):
+                    if self._valid_object_mask(mask, max_pixels, depth, hand_depth, fidx, "SAM-2 box"):
                         return fidx, mask
 
         print("[s3] all prompted attempts failed — using contact heuristic")
