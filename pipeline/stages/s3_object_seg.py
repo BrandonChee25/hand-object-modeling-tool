@@ -294,51 +294,7 @@ class ObjectSegmentationStage:
             r    = int(hand_size * 0.55)
             half = int(hand_size * 0.7)
 
-            # --- attempt 1: depth-band isolation ---
-            # The hand is in the foreground; the body is farther away.
-            # Pixels at hand_depth ± 25% are foreground (hand + object).
-            # After removing the MANO silhouette, what remains should be
-            # the object — no SAM call needed, no body leakage.
-            if depth is not None and hand_depth is not None and tip_points:
-                depth_lo = hand_depth * 0.75
-                depth_hi = hand_depth * 1.25
-                foreground = (
-                    np.isfinite(depth)
-                    & (depth >= depth_lo)
-                    & (depth <= depth_hi)
-                )
-                candidates = foreground & ~hand_mask
-                if candidates.any():
-                    obj = _nearest_component(candidates, tip_points[0])
-                    print(f"[s3] frame {fidx}: depth-band foreground "
-                          f"[{depth_lo:.2f}, {depth_hi:.2f}]m → "
-                          f"{int(candidates.sum())} px candidates, "
-                          f"{int(obj.sum())} px nearest component")
-                    if self._valid_object_mask(obj, max_pixels, depth, hand_depth, fidx, "depth-band"):
-                        return fidx, obj
-
-            # --- attempt 2: SAM3 text+box (SAM fallback) ---
-            bbox_hints = [
-                (
-                    max(0, tip_point[0] - r), max(0, tip_point[1] - r),
-                    min(W - 1, tip_point[0] + r), min(H - 1, tip_point[1] + r),
-                )
-                for tip_point in tip_points
-            ] or [None]
-
-            for bbox_hint in bbox_hints:
-                print(f"[s3] frame {fidx}: trying SAM3 text+box {bbox_hint or '(expanded hand bbox)'}")
-                mask = self.seg_model.segment_held_object(
-                    frame.image,
-                    tuple(frame.hand_bbox.astype(int)),
-                    hand_mask,
-                    object_bbox_hint=bbox_hint,
-                )
-                if mask is not None and mask.any():
-                    if self._valid_object_mask(mask, max_pixels, depth, hand_depth, fidx, "SAM3"):
-                        return fidx, mask
-
-            # --- attempt 3: SAM-2 box prompt (no positive point anchor) ---
+            # --- attempt 1: SAM-2 box prompt (no positive point anchor) ---
             # No positive point so SAM-2 is not steered toward body pixels.
             # The MANO silhouette hand_mask (tight, not bbox rectangle) severs
             # the pants-to-object connection that the old bbox rectangle left
@@ -357,6 +313,46 @@ class ObjectSegmentationStage:
                     mask = mask & ~hand_mask
                     mask = _nearest_component(mask, tip_point)
                     if self._valid_object_mask(mask, max_pixels, depth, hand_depth, fidx, "SAM-2 box"):
+                        return fidx, mask
+
+            # --- attempt 2: depth-band isolation ---
+            if depth is not None and hand_depth is not None and tip_points:
+                depth_lo = hand_depth * 0.75
+                depth_hi = hand_depth * 1.25
+                foreground = (
+                    np.isfinite(depth)
+                    & (depth >= depth_lo)
+                    & (depth <= depth_hi)
+                )
+                candidates = foreground & ~hand_mask
+                if candidates.any():
+                    obj = _nearest_component(candidates, tip_points[0])
+                    print(f"[s3] frame {fidx}: depth-band foreground "
+                          f"[{depth_lo:.2f}, {depth_hi:.2f}]m → "
+                          f"{int(candidates.sum())} px candidates, "
+                          f"{int(obj.sum())} px nearest component")
+                    if self._valid_object_mask(obj, max_pixels, depth, hand_depth, fidx, "depth-band"):
+                        return fidx, obj
+
+            # --- attempt 3: SAM3 text+box ---
+            bbox_hints = [
+                (
+                    max(0, tip_point[0] - r), max(0, tip_point[1] - r),
+                    min(W - 1, tip_point[0] + r), min(H - 1, tip_point[1] + r),
+                )
+                for tip_point in tip_points
+            ] or [None]
+
+            for bbox_hint in bbox_hints:
+                print(f"[s3] frame {fidx}: trying SAM3 text+box {bbox_hint or '(expanded hand bbox)'}")
+                mask = self.seg_model.segment_held_object(
+                    frame.image,
+                    tuple(frame.hand_bbox.astype(int)),
+                    hand_mask,
+                    object_bbox_hint=bbox_hint,
+                )
+                if mask is not None and mask.any():
+                    if self._valid_object_mask(mask, max_pixels, depth, hand_depth, fidx, "SAM3"):
                         return fidx, mask
 
         print("[s3] all prompted attempts failed — using contact heuristic")
