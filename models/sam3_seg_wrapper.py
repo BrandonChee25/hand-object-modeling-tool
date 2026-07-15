@@ -108,13 +108,7 @@ class SAM3SegModel:
             if not cand.any():
                 continue
 
-            # Skip masks that are mostly inside the hand bbox — those are the
-            # hand/arm, not the held object.
-            inside_frac = float((cand & hand_mask).sum()) / float(cand.sum())
-            if inside_frac > 0.5:
-                continue
-
-            # Strip hand bbox pixels and keep largest component.
+            # Strip hand pixels and keep largest component.
             cand = cand & ~hand_mask
             if not cand.any():
                 continue

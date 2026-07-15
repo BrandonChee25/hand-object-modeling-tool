@@ -320,26 +320,7 @@ class ObjectSegmentationStage:
                     if self._valid_object_mask(mask, max_pixels, depth, hand_depth, fidx, "SAM-2 box"):
                         return fidx, mask
 
-            # --- attempt 2: depth-band isolation ---
-            if depth is not None and hand_depth is not None and tip_points:
-                depth_lo = hand_depth * 0.75
-                depth_hi = hand_depth * 1.25
-                foreground = (
-                    np.isfinite(depth)
-                    & (depth >= depth_lo)
-                    & (depth <= depth_hi)
-                )
-                candidates = foreground & ~hand_mask
-                if candidates.any():
-                    obj = _nearest_component(candidates, tip_points[0])
-                    print(f"[s3] frame {fidx}: depth-band foreground "
-                          f"[{depth_lo:.2f}, {depth_hi:.2f}]m → "
-                          f"{int(candidates.sum())} px candidates, "
-                          f"{int(obj.sum())} px nearest component")
-                    if self._valid_object_mask(obj, max_pixels, depth, hand_depth, fidx, "depth-band"):
-                        return fidx, obj
-
-            # --- attempt 3: SAM3 text+box ---
+            # --- attempt 2: SAM3 text+box ---
             bbox_hints = [
                 (
                     max(0, tip_point[0] - r), max(0, tip_point[1] - r),
@@ -359,6 +340,25 @@ class ObjectSegmentationStage:
                 if mask is not None and mask.any():
                     if self._valid_object_mask(mask, max_pixels, depth, hand_depth, fidx, "SAM3"):
                         return fidx, mask
+
+            # --- attempt 3: depth-band isolation ---
+            if depth is not None and hand_depth is not None and tip_points:
+                depth_lo = hand_depth * 0.75
+                depth_hi = hand_depth * 1.25
+                foreground = (
+                    np.isfinite(depth)
+                    & (depth >= depth_lo)
+                    & (depth <= depth_hi)
+                )
+                candidates = foreground & ~hand_mask
+                if candidates.any():
+                    obj = _nearest_component(candidates, tip_points[0])
+                    print(f"[s3] frame {fidx}: depth-band foreground "
+                          f"[{depth_lo:.2f}, {depth_hi:.2f}]m → "
+                          f"{int(candidates.sum())} px candidates, "
+                          f"{int(obj.sum())} px nearest component")
+                    if self._valid_object_mask(obj, max_pixels, depth, hand_depth, fidx, "depth-band"):
+                        return fidx, obj
 
         print("[s3] all prompted attempts failed — using contact heuristic")
         anchor_frame = frames[data.anchor_index]
