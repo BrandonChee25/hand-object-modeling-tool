@@ -142,7 +142,7 @@ def _grip_direction_points(
     hand_bbox_px: np.ndarray,
     image_shape: tuple[int, int],
 ) -> list[tuple[int, int]]:
-    """Fallback: wrist→fingertip direction, probing both sides of the hand."""
+    """Fallback: wrist→fingertip direction, probing fingertip side only."""
     kp = hand_result.keypoints_3d  # (21, 3) camera space
     wrist_cam = kp[0]
     tips_cam  = kp[[4, 8, 12, 16, 20]].mean(0)
@@ -160,13 +160,11 @@ def _grip_direction_points(
     hand_size = max(hx2 - hx1, hy2 - hy1)
     H, W = image_shape
 
-    pts = []
-    for sign in (+1, -1):
-        pt = np.array([hand_cx, hand_cy]) + sign * direction_2d * hand_size * 0.9
-        px = int(np.clip(pt[0], 0, W - 1))
-        py = int(np.clip(pt[1], 0, H - 1))
-        pts.append((px, py))
-    return pts
+    # Only probe fingertip-forward — the -1 direction points toward wrist/body.
+    pt = np.array([hand_cx, hand_cy]) + direction_2d * hand_size * 1.3
+    px = int(np.clip(pt[0], 0, W - 1))
+    py = int(np.clip(pt[1], 0, H - 1))
+    return [(px, py)]
 
 
 class ObjectSegmentationStage:
