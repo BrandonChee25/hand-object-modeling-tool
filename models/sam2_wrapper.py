@@ -69,6 +69,31 @@ class SAM2Model:
         best = int(np.argmax(scores))
         return masks[best].astype(bool)
 
+    def segment_with_box_neg_points(
+        self,
+        image: np.ndarray,
+        box_xyxy: tuple[int, int, int, int],
+        neg_points_xy: list[tuple[int, int]],
+    ) -> np.ndarray | None:
+        """SAM-2 mask inside box with negative (background) points to exclude the hand.
+
+        Negative points sampled from the MANO silhouette tell SAM-2 explicitly
+        which pixels belong to the hand, so it segments the held object instead.
+        """
+        self._load()
+        self._predictor.set_image(image)
+        x1, y1, x2, y2 = box_xyxy
+        pts = np.array(neg_points_xy, dtype=float)
+        labels = np.zeros(len(pts), dtype=int)  # all negative / background
+        masks, scores, _ = self._predictor.predict(
+            point_coords=pts,
+            point_labels=labels,
+            box=np.array([[x1, y1, x2, y2]], dtype=float),
+            multimask_output=True,
+        )
+        best = int(np.argmax(scores))
+        return masks[best].astype(bool)
+
     def segment_with_box_and_point(
         self,
         image: np.ndarray,

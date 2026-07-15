@@ -323,10 +323,52 @@ class ObjectSegmentationStage:
                         mask = _closest_depth_component(mask, depth, hand_depth, tip_point)
                     else:
                         mask = _nearest_component(mask, tip_point)
-                    if self._valid_object_mask(mask, max_pixels, depth, hand_depth, fidx, "SAM-2 box"):
+                    if self._valid_object_mask(mask, max_pixels, depth, hand_depth, fidx, "SAM-2 box",
+                                               frame.hand_bbox):
                         return fidx, mask
 
-        # --- attempt 2: SAM3 text+box on all frames ---
+        # --- attempt 2: SAM-2 hand-bbox + negative MANO points ---
+        # For tightly gripped objects (power grip), the object is inside the
+        # convex hull so &~hand_mask removes it. Instead we pass negative points
+        # on the hand surface so SAM-2 segments the cup/object separately.
+        for fd in frame_data:
+            fidx, frame, hand_mask = fd["fidx"], fd["frame"], fd["hand_mask"]
+            depth, hand_depth      = fd["depth"], fd["hand_depth"]
+            if not hand_mask.any():
+                continue
+            # Sample ~10 evenly spaced negative points from the MANO silhouette.
+            ys, xs = np.where(hand_mask)
+            n_neg = min(10, len(xs))
+            idxs  = np.linspace(0, len(xs) - 1, n_neg, dtype=int)
+            neg_pts = [(int(xs[i]), int(ys[i])) for i in idxs]
+            # Box = hand bbox expanded by 20px on each side.
+            hx1, hy1, hx2, hy2 = frame.hand_bbox.astype(int)
+            box = (max(0, hx1 - 20), max(0, hy1 - 20),
+                   min(W - 1, hx2 + 20), min(H - 1, hy2 + 20))
+            print(f"[s3] frame {fidx}: trying SAM-2 hand-bbox+neg-pts {box}")
+            mask = self._fallback_sam2.segment_with_box_neg_points(
+                frame.image, box, neg_pts
+            )
+            if mask is None or not mask.any():
+                continue
+            raw_n = int(mask.sum())
+            hand_overlap = float((mask & hand_mask).sum()) / (raw_n + 1e-6)
+            if hand_overlap > 0.7:
+                print(f"[s3] frame {fidx} SAM-2 neg-pts: returned hand ({hand_overlap:.0%} overlap)")
+                continue
+            # Light cleanup of residual hand pixels.
+            mask = mask & ~hand_mask
+            # Pick closest-depth component; fall back to nearest-pixel component.
+            probe = (int((hx1 + hx2) / 2), int((hy1 + hy2) / 2))
+            if depth is not None and hand_depth is not None:
+                mask = _closest_depth_component(mask, depth, hand_depth, probe)
+            else:
+                mask = _nearest_component(mask, probe)
+            if self._valid_object_mask(mask, max_pixels, depth, hand_depth, fidx,
+                                       "SAM-2 neg-pts", frame.hand_bbox):
+                return fidx, mask
+
+        # --- attempt 3: SAM3 text+box on all frames ---
         for fd in frame_data:
             fidx, frame, hand_mask = fd["fidx"], fd["frame"], fd["hand_mask"]
             depth, hand_depth      = fd["depth"], fd["hand_depth"]
@@ -348,7 +390,8 @@ class ObjectSegmentationStage:
                     object_bbox_hint=bbox_hint,
                 )
                 if mask is not None and mask.any():
-                    if self._valid_object_mask(mask, max_pixels, depth, hand_depth, fidx, "SAM3"):
+                    if self._valid_object_mask(mask, max_pixels, depth, hand_depth, fidx, "SAM3",
+                                               frame.hand_bbox):
                         return fidx, mask
 
         # --- attempt 3: depth-band isolation on all frames ---
@@ -366,7 +409,8 @@ class ObjectSegmentationStage:
                 obj = _nearest_component(candidates, tip_points[0])
                 print(f"[s3] frame {fidx}: depth-band [{depth_lo:.2f}, {depth_hi:.2f}]m → "
                       f"{int(candidates.sum())} px candidates, {int(obj.sum())} px nearest")
-                if self._valid_object_mask(obj, max_pixels, depth, hand_depth, fidx, "depth-band"):
+                if self._valid_object_mask(obj, max_pixels, depth, hand_depth, fidx, "depth-band",
+                                           frame.hand_bbox):
                     return fidx, obj
 
         print("[s3] all prompted attempts failed — using contact heuristic")
@@ -384,6 +428,7 @@ class ObjectSegmentationStage:
         hand_depth: float | None,
         fidx: int,
         label: str,
+        hand_bbox: np.ndarray | None = None,
     ) -> bool:
         if not mask.any():
             return False
@@ -398,6 +443,22 @@ class ObjectSegmentationStage:
             md = _median_depth(depth, mask)
             if md is not None and md > hand_depth * 1.5:
                 print(f"[s3] frame {fidx} {label}: mask depth {md:.2f}m > hand {hand_depth:.2f}m, likely arm")
+                return False
+        if hand_bbox is not None:
+            # Require ≥50% of mask pixels to be within 1.5× the hand bbox.
+            hx1, hy1, hx2, hy2 = hand_bbox.astype(int)
+            hw = hx2 - hx1
+            hh = hy2 - hy1
+            ex1 = max(0, hx1 - hw // 2)
+            ey1 = max(0, hy1 - hh // 2)
+            ex2 = hx2 + hw // 2
+            ey2 = hy2 + hh // 2
+            region = np.zeros_like(mask)
+            region[ey1:ey2, ex1:ex2] = True
+            overlap_frac = float((mask & region).sum()) / (n + 1e-6)
+            if overlap_frac < 0.5:
+                print(f"[s3] frame {fidx} {label}: mask too far from hand "
+                      f"({overlap_frac:.0%} inside expanded bbox)")
                 return False
         print(f"[s3] frame {fidx} {label}: accepted ({n} px)")
         return True
