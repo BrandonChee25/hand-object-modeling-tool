@@ -112,14 +112,25 @@ class AlignmentStage:
         grip_pos = self.cfg.get("grip_position", 0.6)
         grip_center_cam = c_hand + grip_pos * (finger_center_cam - c_hand)
 
-        # ICP (Stage 5) gives rotation; grip_center_cam gives position.
-        # ICP translation drifts when scale has small errors, so position uses
-        # the hand-derived grip-centre which is stable and verified to work.
-        R_aligned, _ = _consensus_pose(data)
+        R_aligned, t_fp = _consensus_pose(data)
 
         obj_verts_posed = canon_verts @ R_aligned.T
         canon_center = obj_verts_posed.mean(axis=0)
-        obj_verts_aligned = grip_center_cam + obj_scale * (obj_verts_posed - canon_center)
+
+        # If Stage 5 used FoundationPose (alpha_p_values all 1.0), its translation
+        # is the metric object centroid in camera space — more accurate than the
+        # hand-derived grip centre heuristic.  Fall back to grip_center_cam for
+        # the DINOv2 path (alpha_p_values all 0.0) or the identity stub.
+        fp_trans_valid = (
+            data.object_poses is not None
+            and all(a == 1.0 for a in data.object_poses.alpha_p_values)
+            and float(np.linalg.norm(t_fp)) > 0.05  # guard against near-zero stub
+        )
+        obj_center_cam = t_fp if fp_trans_valid else grip_center_cam
+        if fp_trans_valid:
+            print(f"[s6] using FoundationPose translation as object centre: {t_fp.tolist()}")
+
+        obj_verts_aligned = obj_center_cam + obj_scale * (obj_verts_posed - canon_center)
 
         # Push out any residual penetration into the hand mesh.
         obj_verts_aligned = _resolve_penetration(
