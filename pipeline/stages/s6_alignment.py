@@ -112,20 +112,25 @@ class AlignmentStage:
         grip_pos = self.cfg.get("grip_position", 0.6)
         grip_center_cam = c_hand + grip_pos * (finger_center_cam - c_hand)
 
-        R_aligned, t_fp = _consensus_pose(data)
+        fp_path = (
+            data.object_poses is not None
+            and all(a == 1.0 for a in data.object_poses.alpha_p_values)
+        )
+
+        if fp_path:
+            # FoundationPose: use anchor frame pose directly.
+            # Each frame's pose is in that frame's camera space, so averaging
+            # across frames gives a meaningless translation when the camera moves.
+            anchor_idx = data.object_seg.anchor_frame_index
+            R_aligned = np.array(data.object_poses.rots[anchor_idx], dtype=np.float64)
+            t_fp = np.array(data.object_poses.trans[anchor_idx], dtype=np.float64)
+        else:
+            R_aligned, t_fp = _consensus_pose(data)
 
         obj_verts_posed = canon_verts @ R_aligned.T
         canon_center = obj_verts_posed.mean(axis=0)
 
-        # If Stage 5 used FoundationPose (alpha_p_values all 1.0), its translation
-        # is the metric object centroid in camera space — more accurate than the
-        # hand-derived grip centre heuristic.  Fall back to grip_center_cam for
-        # the DINOv2 path (alpha_p_values all 0.0) or the identity stub.
-        fp_trans_valid = (
-            data.object_poses is not None
-            and all(a == 1.0 for a in data.object_poses.alpha_p_values)
-            and float(np.linalg.norm(t_fp)) > 0.05  # guard against near-zero stub
-        )
+        fp_trans_valid = fp_path and float(np.linalg.norm(t_fp)) > 0.05
         obj_center_cam = t_fp if fp_trans_valid else grip_center_cam
         if fp_trans_valid:
             print(f"[s6] using FoundationPose translation as object centre: {t_fp.tolist()}")
