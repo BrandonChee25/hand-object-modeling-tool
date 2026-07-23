@@ -131,13 +131,7 @@ class AlignmentStage:
         canon_center = obj_verts_posed.mean(axis=0)
 
         fp_trans_valid = fp_path and float(np.linalg.norm(t_fp)) > 0.05
-        obj_center_cam = grip_center_cam  # DEBUG: force grip centre
-        print(f"[s6 debug] c_hand      = {c_hand.tolist()}")
-        print(f"[s6 debug] grip_centre = {grip_center_cam.tolist()}")
-        print(f"[s6 debug] c_obj(moge) = {c_obj.tolist()}")
-        if fp_path:
-            print(f"[s6 debug] t_fp(FP)    = {t_fp.tolist()}")
-            print(f"[s6 debug] fp_valid={fp_trans_valid}  chosen={obj_center_cam.tolist()}")
+        obj_center_cam = t_fp if fp_trans_valid else grip_center_cam
 
         obj_verts_aligned = obj_center_cam + obj_scale * (obj_verts_posed - canon_center)
 

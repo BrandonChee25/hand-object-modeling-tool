@@ -20,6 +20,22 @@ import numpy as np
 
 
 def hand_verts_in_camera(data: dict, i: int) -> np.ndarray:
+    # Use Stage 6's anchor-frame hand as the metric reference position.
+    # Per-frame articulation comes from WiLoR: scale the delta from the anchor
+    # WiLoR pose by the same factor Stage 6 used, so fingers move correctly.
+    if "aligned_hand_verts" in data:
+        aligned  = data["aligned_hand_verts"]           # (778, 3) metric, anchor frame
+        anchor   = data["hand_vertices"][int(data["anchor_frame_idx"])]
+        raw_span = float(np.linalg.norm(anchor.max(0) - anchor.min(0)))
+        met_span = float(np.linalg.norm(aligned.max(0) - aligned.min(0)))
+        scale    = met_span / max(raw_span, 1e-6)
+        center   = aligned.mean(0)
+        anchor_c = anchor.mean(0)
+        verts_i  = data["hand_vertices"][i]
+        return center + scale * (verts_i - anchor_c)
+
+    # Legacy fallback (WiLoR coordinate space — only correct if hand_translation
+    # happens to be in the same metric camera space as the object poses).
     verts  = data["hand_vertices"][i]
     R      = data["hand_global_rot"][i]
     t      = data["hand_translation"][i]
@@ -28,9 +44,13 @@ def hand_verts_in_camera(data: dict, i: int) -> np.ndarray:
 
 
 def object_verts_in_camera(data: dict, i: int) -> np.ndarray:
-    verts = data["object_mesh_vertices"]
-    R     = data["object_rots"][i]
-    t     = data["object_trans"][i]
+    # Use the metric-scaled, origin-centred mesh when available so that FP's
+    # (R, t) pose places the object at the correct size and depth.
+    verts = (data["object_mesh_verts_metric"]
+             if "object_mesh_verts_metric" in data
+             else data["object_mesh_vertices"])
+    R = data["object_rots"][i]
+    t = data["object_trans"][i]
     return (R @ verts.T).T + t
 
 

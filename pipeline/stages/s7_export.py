@@ -118,6 +118,27 @@ def _save_trajectory(data: PipelineData, output_dir: Path) -> None:
     obj_verts = data.object_mesh.vertices.astype(np.float32)
     obj_faces = data.object_mesh.faces.astype(np.int32)
 
+    # --- metric-scaled, origin-centred object mesh for correct viewer placement ---
+    # FP poses assume the mesh is centred at origin and scaled to metres, so applying
+    # (R, t) to this mesh places the object correctly in camera space.
+    seed_idx = data.object_seg.anchor_frame_index
+    from pipeline.stages.s5_object_pose import _scale_mesh_to_metric
+    depth_seed = data.depth_maps.get(seed_idx, data.depth_map)
+    obj_verts_metric, _ = _scale_mesh_to_metric(
+        data.object_mesh.vertices,
+        data.object_mesh.faces,
+        data.object_seg.masks[seed_idx],
+        depth_seed,
+        data.camera_intrinsics,
+    )
+
+    # --- Stage 6 aligned hand vertices (anchor frame, metric camera space) ---
+    aligned_hand_verts = (
+        data.aligned_scene.hand_vertices.astype(np.float32)
+        if data.aligned_scene is not None
+        else np.zeros((778, 3), dtype=np.float32)
+    )
+
     out_path = output_dir / "trajectory.npz"
     np.savez_compressed(
         out_path,
@@ -133,6 +154,9 @@ def _save_trajectory(data: PipelineData, output_dir: Path) -> None:
         camera_intrinsics=K,
         object_mesh_vertices=obj_verts,
         object_mesh_faces=obj_faces,
+        object_mesh_verts_metric=obj_verts_metric,
+        aligned_hand_verts=aligned_hand_verts,
+        anchor_frame_idx=np.int32(seed_idx),
     )
     print(f"[s7] saved trajectory.npz  ({T} frames, {out_path.stat().st_size // 1024} KB)")
 
