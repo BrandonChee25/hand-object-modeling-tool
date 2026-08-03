@@ -17,11 +17,16 @@ def crop_with_mask(
     mask: np.ndarray,
     padding: int = 32,
     fill_value: int = 128,
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
     """Crop the tightest bounding box around mask, padded, background filled.
 
     Background pixels outside the mask are filled with fill_value (neutral grey
     by default — consistent with SAM-3D's expected input conditioning).
+
+    Returns
+    -------
+    cropped_image : (H', W', 3) uint8 — object region, background grey
+    cropped_mask  : (H', W') bool   — object mask in the same crop window
     """
     ys, xs = np.where(mask)
     if len(xs) == 0:
@@ -36,4 +41,4 @@ def crop_with_mask(
     crop = image[y1:y2, x1:x2].copy()
     crop_mask = mask[y1:y2, x1:x2]
     crop[~crop_mask] = fill_value
-    return crop
+    return crop, crop_mask

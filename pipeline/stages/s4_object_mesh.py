@@ -1,15 +1,18 @@
-"""Stage 4 — Blind 3D object mesh generation (SAM-3D).
+"""Stage 4 — 3D object mesh generation with SAM-3D Objects.
 
 Takes the anchor frame crop (masked to the object) and feeds it into SAM-3D,
-an image-conditioned generative 3D foundation model that produces a mesh
-without any template or category prior — i.e. fully blind reconstruction.
+Meta's diffusion-based 3D reconstruction model trained on hand-object interaction
+data.  Because it was trained specifically on occluded held objects, it can
+hallucinate plausible geometry for the parts of the object hidden under the hand —
+which TripoSR (the previous feed-forward substitute) could not do.
 
 SAM-3D jointly outputs:
-  x_s — object shape (mesh in a canonical coordinate frame)
-  x_p — canonical pose (R, t) in the anchor camera frame
+  mesh (via GLB post-processing)  — object shape in canonical frame
+  rotation / translation          — estimated canonical pose
 
-We record both; the pose is used as the starting point for guided diffusion
-in Stage 5.
+Required config keys:
+    sam3d_dir             : path to cloned facebookresearch/sam-3d-objects repo
+    sam3d_checkpoint_tag  : checkpoint tag inside checkpoints/ (default: "hf")
 """
 
 from __future__ import annotations
@@ -25,7 +28,8 @@ class ObjectMeshGenerationStage:
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.sam3d = SAM3DModel(
-            checkpoint=cfg.get("sam3d_checkpoint", "stabilityai/TripoSR"),
+            sam3d_dir=cfg["sam3d_dir"],
+            checkpoint_tag=cfg.get("sam3d_checkpoint_tag", "hf"),
             device=cfg.get("device", "cuda"),
         )
 
@@ -36,8 +40,11 @@ class ObjectMeshGenerationStage:
         anchor_frame = data.frames[seed_idx]
         anchor_mask = data.object_seg.masks[seed_idx]
 
-        # Crop the object region; background filled with the model's expected fill.
-        cropped_image = crop_with_mask(
+        # Crop the object region; background filled with neutral grey.
+        # crop_with_mask returns both the RGB crop and the matching boolean mask
+        # crop, which SAM-3D uses as an alpha channel to know what is object vs
+        # background.
+        cropped_image, cropped_mask = crop_with_mask(
             anchor_frame.image,
             anchor_mask,
             padding=self.cfg.get("crop_padding_px", 32),
@@ -45,6 +52,7 @@ class ObjectMeshGenerationStage:
 
         result = self.sam3d.generate(
             image=cropped_image,
+            mask=cropped_mask,
             camera_intrinsics=data.camera_intrinsics,
         )
         # result keys: "vertices", "faces", "canonical_rot", "canonical_trans"
