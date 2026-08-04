@@ -8,8 +8,8 @@ wilor_checkpoint: checkpoints/wilor.pth
 moge_checkpoint: Ruicheng/moge-vitl
 sam2_checkpoint: /gscratch/scrubbed/bchee05/checkpoints/sam2.1_hiera_large.pt
 sam2_config: configs/sam2.1/sam2.1_hiera_l.yaml
-# sam3d_checkpoint unused — SAM-3D is not publicly released; TripoSR is used instead
-# (weights download automatically from HuggingFace: stabilityai/TripoSR)
+sam3d_dir: /gscratch/scrubbed/bchee05/sam-3d-objects   # cloned facebookresearch/sam-3d-objects repo
+sam3d_checkpoint_tag: hf                                # checkpoint tag inside checkpoints/
 
 # --- Stage 1: Preprocessing ---
 hand_detection_confidence: 0.3   # minimum YOLO score to accept a hand bbox
