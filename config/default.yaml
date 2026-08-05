@@ -28,3 +28,4 @@ detection_candidate_frames: 5   # how many frames to try the hand-box prompt on
 # --- Stage 6: Alignment ---
 grip_position: 0.6        # 0=palm centre, 1=fingertips; where the object is initially placed
 max_contact_push_m: 0.10  # safety cap on how far the object can be pushed to clear the hand mesh
+foundation_pose_dir: /gscratch/scrubbed/bchee05/FoundationPose
