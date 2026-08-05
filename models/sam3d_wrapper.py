@@ -223,8 +223,8 @@ class SAM3DModel:
 
         if rot_q is not None:
             if hasattr(rot_q, "detach"):
-                rot_q = rot_q.detach().cpu().numpy()
-            q = np.array(rot_q).flatten()
+                rot_q = rot_q.detach().float().cpu().numpy()
+            q = np.array(rot_q, dtype=np.float32).flatten()
             # SAM-3D uses [w, x, y, z]; scipy expects [x, y, z, w].
             R = Rotation.from_quat([q[1], q[2], q[3], q[0]]).as_matrix()
         else:
@@ -232,8 +232,8 @@ class SAM3DModel:
 
         if trans is not None:
             if hasattr(trans, "detach"):
-                trans = trans.detach().cpu().numpy()
-            t = np.array(trans).flatten()[:3]
+                trans = trans.detach().float().cpu().numpy()
+            t = np.array(trans, dtype=np.float32).flatten()[:3]
         else:
             t = np.zeros(3, dtype=np.float64)
 
