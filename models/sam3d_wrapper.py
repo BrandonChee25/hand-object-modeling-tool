@@ -127,8 +127,10 @@ class SAM3DModel:
         vertices, faces = self._extract_mesh(result)
         canonical_rot, canonical_trans = self._extract_pose(result)
 
-        # Centre the mesh at the origin so that Stage 5's FP translation gives
-        # the object centroid directly (same convention as the old TripoSR output).
+        # Pre-rotate by SAM-3D's canonical rotation so FP receives the mesh in
+        # approximately the correct camera-space orientation.  Without this, FP
+        # works against SAM-3D's arbitrary canonical frame and produces wrong angles.
+        vertices = (canonical_rot @ vertices.T).T
         vertices -= vertices.mean(0)
 
         return {
