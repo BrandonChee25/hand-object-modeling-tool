@@ -59,7 +59,19 @@ def object_verts_in_camera(data: dict, i: int) -> np.ndarray:
              if "object_mesh_verts_metric" in data
              else data["object_mesh_vertices"])
     R = data["object_rots"][i]
-    t = data["object_trans"][i]
+
+    # Snap the anchor-frame object to the hand grip centre so FP registration
+    # error (mesh centroid ≠ grip point) doesn't cause a persistent visual offset.
+    # Frame-to-frame motion still comes entirely from FP tracking.
+    if "aligned_hand_verts" in data and "object_trans" in data:
+        anchor_idx  = int(data["anchor_frame_idx"])
+        grip_center = data["aligned_hand_verts"].mean(0)   # palm centroid in metric
+        fp_anchor   = data["object_trans"][anchor_idx]
+        fp_delta    = data["object_trans"][i] - fp_anchor
+        t = grip_center + fp_delta
+    else:
+        t = data["object_trans"][i]
+
     return (R @ verts.T).T + t
 
 
