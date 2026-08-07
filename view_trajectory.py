@@ -20,19 +20,28 @@ import numpy as np
 
 
 def hand_verts_in_camera(data: dict, i: int) -> np.ndarray:
-    # Use Stage 6's anchor-frame hand as the metric reference position.
-    # Per-frame articulation comes from WiLoR: scale the delta from the anchor
-    # WiLoR pose by the same factor Stage 6 used, so fingers move correctly.
+    # Global motion comes from FP's object translation delta (hand and object move
+    # rigidly together). Local articulation (finger shape) comes from WiLoR's
+    # centroid-relative vertex change, scaled to metric units.
     if "aligned_hand_verts" in data:
-        aligned  = data["aligned_hand_verts"]           # (778, 3) metric, anchor frame
-        anchor   = data["hand_vertices"][int(data["anchor_frame_idx"])]
-        raw_span = float(np.linalg.norm(anchor.max(0) - anchor.min(0)))
+        aligned    = data["aligned_hand_verts"]              # metric, anchor frame
+        anchor_idx = int(data["anchor_frame_idx"])
+        anchor_raw = data["hand_vertices"][anchor_idx]       # WiLoR at anchor
+
+        raw_span = float(np.linalg.norm(anchor_raw.max(0) - anchor_raw.min(0)))
         met_span = float(np.linalg.norm(aligned.max(0) - aligned.min(0)))
         scale    = met_span / max(raw_span, 1e-6)
-        center   = aligned.mean(0)
-        anchor_c = anchor.mean(0)
-        verts_i  = data["hand_vertices"][i]
-        return center + scale * (verts_i - anchor_c)
+
+        # Global translation from FP tracking
+        fp_delta = data["object_trans"][i] - data["object_trans"][anchor_idx]
+
+        # Articulation: centroid-relative finger shape change in WiLoR space
+        anchor_c  = anchor_raw.mean(0)
+        verts_i   = data["hand_vertices"][i]
+        verts_i_c = verts_i.mean(0)
+        articulation = scale * ((verts_i - verts_i_c) - (anchor_raw - anchor_c))
+
+        return aligned + fp_delta + articulation
 
     # Legacy fallback (WiLoR coordinate space — only correct if hand_translation
     # happens to be in the same metric camera space as the object poses).
