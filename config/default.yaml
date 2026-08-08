@@ -24,6 +24,7 @@ sam3_version: sam3.1   # facebook/sam3.1 on HuggingFace (or facebook/sam3 for v1
 crop_padding_px: 32              # pixels to pad around the object crop
 hand_overlap_threshold: 0.30     # max fraction of a segment overlapping the hand
 detection_candidate_frames: 5   # how many frames to try the hand-box prompt on
+arm_depth_tolerance: 1.2        # reject masks whose median depth > this × hand depth (arm filter)
 
 # --- Stage 6: Alignment ---
 grip_position: 0.6        # 0=palm centre, 1=fingertips; where the object is initially placed
