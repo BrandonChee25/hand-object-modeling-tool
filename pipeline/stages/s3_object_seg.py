@@ -288,7 +288,8 @@ class ObjectSegmentationStage:
         else:
             depth_prox = 0.5
 
-        return 0.4 * compactness + 0.35 * prox + 0.25 * depth_prox
+        total = 0.4 * compactness + 0.35 * prox + 0.25 * depth_prox
+        return total, compactness, prox, depth_prox
 
     def _find_held_object(self, data: PipelineData) -> tuple[int, np.ndarray]:
         """Find the held object seed mask.
@@ -355,11 +356,12 @@ class ObjectSegmentationStage:
             if self._valid_object_mask(
                 mask, max_pixels, fd["depth"], fd["hand_depth"], fidx, label, fd["frame"].hand_bbox
             ):
-                score = self._score_mask(
+                score, compact, prox, depth_prox = self._score_mask(
                     mask, fd["depth"], fd["hand_depth"], tip_point, H, W
                 )
                 all_candidates.append((score, fidx, mask))
-                print(f"[s3] frame {fidx} {label}: candidate score={score:.3f}")
+                print(f"[s3] frame {fidx} {label}: candidate score={score:.3f} "
+                      f"(compact={compact:.3f}, tip_prox={prox:.3f}, depth_prox={depth_prox:.3f})")
 
         # --- strategy 1: SAM-2 box (no positive point) ---
         for fd in frame_data:
