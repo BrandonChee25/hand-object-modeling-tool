@@ -255,18 +255,21 @@ class ObjectSegmentationStage:
         tip_point: tuple[int, int] | None,
         H: int,
         W: int,
-    ) -> float:
+        hand_bbox: np.ndarray | None = None,
+    ) -> tuple:
         """Score a candidate object mask (higher = more object-like).
 
-        Combines three signals:
-          compactness  — objects are compact; arms are long and thin
+        Combines four signals:
+          compactness   — objects are compact; arms are long and thin
           tip_proximity — the object centroid should be near the fingertips
           depth_proximity — the object should be at the same depth as the hand
+          size          — mask should be a reasonable fraction of the hand bbox area;
+                          tiny specks (skin slivers, noise) score near zero
         """
         ys, xs = np.where(mask)
         n = int(mask.sum())
         if n == 0:
-            return 0.0
+            return 0.0, 0.0, 0.0, 0.0, 0.0
 
         bbox_area = (int(xs.max()) - int(xs.min()) + 1) * (int(ys.max()) - int(ys.min()) + 1)
         compactness = n / max(bbox_area, 1)
@@ -288,8 +291,16 @@ class ObjectSegmentationStage:
         else:
             depth_prox = 0.5
 
-        total = 0.4 * compactness + 0.35 * prox + 0.25 * depth_prox
-        return total, compactness, prox, depth_prox
+        if hand_bbox is not None:
+            hx1, hy1, hx2, hy2 = hand_bbox.astype(float)
+            hand_bbox_area = max((hx2 - hx1) * (hy2 - hy1), 1.0)
+            # Saturates at 1.0 when mask >= 15% of hand bbox area.
+            size_score = min(1.0, n / (0.15 * hand_bbox_area))
+        else:
+            size_score = 0.5
+
+        total = 0.35 * compactness + 0.30 * prox + 0.15 * depth_prox + 0.20 * size_score
+        return total, compactness, prox, depth_prox, size_score
 
     def _find_held_object(self, data: PipelineData) -> tuple[int, np.ndarray]:
         """Find the held object seed mask.
@@ -356,12 +367,14 @@ class ObjectSegmentationStage:
             if self._valid_object_mask(
                 mask, max_pixels, fd["depth"], fd["hand_depth"], fidx, label, fd["frame"].hand_bbox
             ):
-                score, compact, prox, depth_prox = self._score_mask(
-                    mask, fd["depth"], fd["hand_depth"], tip_point, H, W
+                score, compact, prox, depth_prox, size_score = self._score_mask(
+                    mask, fd["depth"], fd["hand_depth"], tip_point, H, W,
+                    hand_bbox=fd["frame"].hand_bbox,
                 )
                 all_candidates.append((score, fidx, mask))
                 print(f"[s3] frame {fidx} {label}: candidate score={score:.3f} "
-                      f"(compact={compact:.3f}, tip_prox={prox:.3f}, depth_prox={depth_prox:.3f})")
+                      f"(compact={compact:.3f}, tip_prox={prox:.3f}, "
+                      f"depth_prox={depth_prox:.3f}, size={size_score:.3f})")
 
         # --- strategy 1: SAM-2 box (no positive point) ---
         for fd in frame_data:
