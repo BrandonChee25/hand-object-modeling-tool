@@ -247,16 +247,64 @@ class ObjectSegmentationStage:
                 print(f"[s3] MANO silhouette failed ({e}), falling back to bbox")
         return self._hand_mask(frame)
 
+    def _score_mask(
+        self,
+        mask: np.ndarray,
+        depth: np.ndarray | None,
+        hand_depth: float | None,
+        tip_point: tuple[int, int] | None,
+        H: int,
+        W: int,
+    ) -> float:
+        """Score a candidate object mask (higher = more object-like).
+
+        Combines three signals:
+          compactness  — objects are compact; arms are long and thin
+          tip_proximity — the object centroid should be near the fingertips
+          depth_proximity — the object should be at the same depth as the hand
+        """
+        ys, xs = np.where(mask)
+        n = int(mask.sum())
+        if n == 0:
+            return 0.0
+
+        bbox_area = (int(xs.max()) - int(xs.min()) + 1) * (int(ys.max()) - int(ys.min()) + 1)
+        compactness = n / max(bbox_area, 1)
+
+        if tip_point is not None:
+            cx, cy = float(xs.mean()), float(ys.mean())
+            dist = float(np.sqrt((cx - tip_point[0]) ** 2 + (cy - tip_point[1]) ** 2))
+            diag = float(np.sqrt(H ** 2 + W ** 2))
+            prox = 1.0 / (1.0 + 3.0 * dist / diag)
+        else:
+            prox = 0.5
+
+        if depth is not None and hand_depth is not None:
+            md = _median_depth(depth, mask)
+            if md is not None:
+                depth_prox = 1.0 / (1.0 + 5.0 * abs(md - hand_depth) / max(hand_depth, 1e-6))
+            else:
+                depth_prox = 0.3
+        else:
+            depth_prox = 0.5
+
+        return 0.4 * compactness + 0.35 * prox + 0.25 * depth_prox
+
     def _find_held_object(self, data: PipelineData) -> tuple[int, np.ndarray]:
         """Find the held object seed mask.
 
-        Priority order per candidate frame:
-          1. SAM-2 box+point prompt around fingertip-projected location.
-          2. SAM3 text + box prompt at the same location (fallback).
-          3. SAM-2 auto-segment contact heuristic (final fallback).
+        Two-pass approach: all strategies run on all candidate frames, every
+        valid mask is scored (compactness + fingertip proximity + depth), and
+        the highest-scoring candidate wins.  This avoids locking in on the
+        first frame that happens to pass validation, which may have a bad
+        viewing angle or contain the arm instead of the object.
 
-        All steps use a tight MANO silhouette mask (not the bbox rectangle)
-        to exclude the hand, so object pixels inside the bbox are preserved.
+        Strategies tried (in order of preference for scoring weight):
+          1. SAM-2 box + positive fingertip point
+          2. SAM-2 hand-bbox + negative MANO points
+          3. SAM3 text + box
+          4. Depth-band isolation
+          5. Contact heuristic (final fallback, no scoring)
         """
         frames = data.frames
         indices = self._candidate_indices(data)
@@ -266,15 +314,15 @@ class ObjectSegmentationStage:
         hand_results = {r.frame_index: r for r in data.hand_results}
         K = data.camera_intrinsics
 
-        # Pre-compute per-frame data once so each attempt pass can reuse it.
+        # Pre-compute per-frame data once so all strategy passes can reuse it.
         frame_data = []
         for fidx in indices:
             frame = frames[fidx]
             if frame.hand_bbox is None:
                 continue
-            hr        = hand_results.get(fidx)
-            hand_mask = self._hand_mask_for(frame, hr)
-            depth     = data.depth_maps.get(fidx, data.depth_map)
+            hr         = hand_results.get(fidx)
+            hand_mask  = self._hand_mask_for(frame, hr)
+            depth      = data.depth_maps.get(fidx, data.depth_map)
             hand_depth = _median_depth(depth, hand_mask)
 
             tip_points: list[tuple[int, int]] = []
@@ -301,7 +349,19 @@ class ObjectSegmentationStage:
                 r=int(hand_size * 0.55), half=int(hand_size * 0.7),
             ))
 
-        # --- attempt 1: SAM-2 box + positive fingertip point on all frames ---
+        all_candidates: list[tuple[float, int, np.ndarray]] = []
+
+        def _add_candidate(mask, fidx, fd, label, tip_point=None):
+            if self._valid_object_mask(
+                mask, max_pixels, fd["depth"], fd["hand_depth"], fidx, label, fd["frame"].hand_bbox
+            ):
+                score = self._score_mask(
+                    mask, fd["depth"], fd["hand_depth"], tip_point, H, W
+                )
+                all_candidates.append((score, fidx, mask))
+                print(f"[s3] frame {fidx} {label}: candidate score={score:.3f}")
+
+        # --- strategy 1: SAM-2 box + positive fingertip point ---
         for fd in frame_data:
             fidx, frame, hand_mask = fd["fidx"], fd["frame"], fd["hand_mask"]
             depth, hand_depth      = fd["depth"], fd["hand_depth"]
@@ -313,11 +373,8 @@ class ObjectSegmentationStage:
                     min(W - 1, tip_point[0] + half),
                     min(H - 1, tip_point[1] + half),
                 )
-                print(f"[s3] frame {fidx}: trying SAM-2 box+point {box} "
-                      f"@ {tip_point} ({box[2]-box[0]}×{box[3]-box[1]}px)")
-                mask = self._fallback_sam2.segment_with_box_and_point(
-                    frame.image, box, tip_point
-                )
+                print(f"[s3] frame {fidx}: trying SAM-2 box+point {box} @ {tip_point}")
+                mask = self._fallback_sam2.segment_with_box_and_point(frame.image, box, tip_point)
                 if mask is not None and mask.any():
                     print(f"[s3] frame {fidx} SAM-2 raw mask: {int(mask.sum())} px before hand removal")
                     mask = mask & ~hand_mask
@@ -325,66 +382,50 @@ class ObjectSegmentationStage:
                         mask = _closest_depth_component(mask, depth, hand_depth, tip_point)
                     else:
                         mask = _nearest_component(mask, tip_point)
-                    if self._valid_object_mask(mask, max_pixels, depth, hand_depth, fidx, "SAM-2 box",
-                                               frame.hand_bbox):
-                        return fidx, mask
+                    _add_candidate(mask, fidx, fd, "SAM-2 box+point", tip_point)
 
-        # --- attempt 2: SAM-2 hand-bbox + negative MANO points ---
-        # For tightly gripped objects (power grip), the object is inside the
-        # convex hull so &~hand_mask removes it. Instead we pass negative points
-        # on the hand surface so SAM-2 segments the cup/object separately.
+        # --- strategy 2: SAM-2 hand-bbox + negative MANO points ---
         for fd in frame_data:
             fidx, frame, hand_mask = fd["fidx"], fd["frame"], fd["hand_mask"]
             depth, hand_depth      = fd["depth"], fd["hand_depth"]
             if not hand_mask.any():
                 continue
-            # Sample ~10 evenly spaced negative points from the MANO silhouette.
             ys, xs = np.where(hand_mask)
-            n_neg = min(10, len(xs))
-            idxs  = np.linspace(0, len(xs) - 1, n_neg, dtype=int)
+            n_neg  = min(10, len(xs))
+            idxs   = np.linspace(0, len(xs) - 1, n_neg, dtype=int)
             neg_pts = [(int(xs[i]), int(ys[i])) for i in idxs]
-            # Box = hand bbox expanded by 20px on each side.
             hx1, hy1, hx2, hy2 = frame.hand_bbox.astype(int)
             box = (max(0, hx1 - 20), max(0, hy1 - 20),
                    min(W - 1, hx2 + 20), min(H - 1, hy2 + 20))
             print(f"[s3] frame {fidx}: trying SAM-2 hand-bbox+neg-pts {box}")
-            mask = self._fallback_sam2.segment_with_box_neg_points(
-                frame.image, box, neg_pts
-            )
+            mask = self._fallback_sam2.segment_with_box_neg_points(frame.image, box, neg_pts)
             if mask is None or not mask.any():
                 continue
             raw_n = int(mask.sum())
-            hand_overlap = float((mask & hand_mask).sum()) / (raw_n + 1e-6)
-            if hand_overlap > 0.7:
-                print(f"[s3] frame {fidx} SAM-2 neg-pts: returned hand ({hand_overlap:.0%} overlap)")
+            if float((mask & hand_mask).sum()) / (raw_n + 1e-6) > 0.7:
+                print(f"[s3] frame {fidx} SAM-2 neg-pts: returned hand (>70% overlap)")
                 continue
-            # Light cleanup of residual hand pixels.
-            mask = mask & ~hand_mask
-            # Pick closest-depth component; fall back to nearest-pixel component.
+            mask  = mask & ~hand_mask
             probe = (int((hx1 + hx2) / 2), int((hy1 + hy2) / 2))
+            tip_point = fd["tip_points"][0] if fd["tip_points"] else probe
             if depth is not None and hand_depth is not None:
                 mask = _closest_depth_component(mask, depth, hand_depth, probe)
             else:
                 mask = _nearest_component(mask, probe)
-            if self._valid_object_mask(mask, max_pixels, depth, hand_depth, fidx,
-                                       "SAM-2 neg-pts", frame.hand_bbox):
-                return fidx, mask
+            _add_candidate(mask, fidx, fd, "SAM-2 neg-pts", tip_point)
 
-        # --- attempt 3: SAM3 text+box on all frames ---
+        # --- strategy 3: SAM3 text + box ---
         for fd in frame_data:
             fidx, frame, hand_mask = fd["fidx"], fd["frame"], fd["hand_mask"]
             depth, hand_depth      = fd["depth"], fd["hand_depth"]
             tip_points, r          = fd["tip_points"], fd["r"]
             bbox_hints = [
-                (
-                    max(0, tp[0] - r), max(0, tp[1] - r),
-                    min(W - 1, tp[0] + r), min(H - 1, tp[1] + r),
-                )
+                (max(0, tp[0] - r), max(0, tp[1] - r),
+                 min(W - 1, tp[0] + r), min(H - 1, tp[1] + r))
                 for tp in tip_points
             ] or [None]
-            for bbox_hint in bbox_hints:
-                print(f"[s3] frame {fidx}: trying SAM3 text+box "
-                      f"{bbox_hint or '(expanded hand bbox)'}")
+            for i, bbox_hint in enumerate(bbox_hints):
+                print(f"[s3] frame {fidx}: trying SAM3 text+box {bbox_hint or '(expanded hand bbox)'}")
                 mask = self.seg_model.segment_held_object(
                     frame.image,
                     tuple(frame.hand_bbox.astype(int)),
@@ -392,28 +433,33 @@ class ObjectSegmentationStage:
                     object_bbox_hint=bbox_hint,
                 )
                 if mask is not None and mask.any():
-                    if self._valid_object_mask(mask, max_pixels, depth, hand_depth, fidx, "SAM3",
-                                               frame.hand_bbox):
-                        return fidx, mask
+                    tip_point = tip_points[i] if i < len(tip_points) else None
+                    _add_candidate(mask, fidx, fd, "SAM3", tip_point)
 
-        # --- attempt 3: depth-band isolation on all frames ---
+        # --- strategy 4: depth-band isolation ---
         for fd in frame_data:
             fidx, frame, hand_mask = fd["fidx"], fd["frame"], fd["hand_mask"]
             depth, hand_depth      = fd["depth"], fd["hand_depth"]
             tip_points             = fd["tip_points"]
             if depth is None or hand_depth is None or not tip_points:
                 continue
-            depth_lo = hand_depth * 0.75
-            depth_hi = hand_depth * 1.25
+            depth_lo   = hand_depth * 0.75
+            depth_hi   = hand_depth * 1.25
             foreground = np.isfinite(depth) & (depth >= depth_lo) & (depth <= depth_hi)
-            candidates = foreground & ~hand_mask
-            if candidates.any():
-                obj = _nearest_component(candidates, tip_points[0])
+            cands      = foreground & ~hand_mask
+            if cands.any():
+                tip_point = tip_points[0]
+                obj = _nearest_component(cands, tip_point)
                 print(f"[s3] frame {fidx}: depth-band [{depth_lo:.2f}, {depth_hi:.2f}]m → "
-                      f"{int(candidates.sum())} px candidates, {int(obj.sum())} px nearest")
-                if self._valid_object_mask(obj, max_pixels, depth, hand_depth, fidx, "depth-band",
-                                           frame.hand_bbox):
-                    return fidx, obj
+                      f"{int(obj.sum())} px nearest")
+                _add_candidate(obj, fidx, fd, "depth-band", tip_point)
+
+        if all_candidates:
+            all_candidates.sort(key=lambda x: x[0], reverse=True)
+            best_score, best_fidx, best_mask = all_candidates[0]
+            print(f"[s3] selected frame {best_fidx} score={best_score:.3f} "
+                  f"({len(all_candidates)} candidates evaluated)")
+            return best_fidx, best_mask
 
         print("[s3] all prompted attempts failed — using contact heuristic")
         anchor_frame = frames[data.anchor_index]
