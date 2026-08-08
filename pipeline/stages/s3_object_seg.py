@@ -300,7 +300,7 @@ class ObjectSegmentationStage:
         viewing angle or contain the arm instead of the object.
 
         Strategies tried (in order of preference for scoring weight):
-          1. SAM-2 box + positive fingertip point
+          1. SAM-2 box (no positive point)
           2. SAM-2 hand-bbox + negative MANO points
           3. SAM3 text + box
           4. Depth-band isolation
@@ -361,7 +361,7 @@ class ObjectSegmentationStage:
                 all_candidates.append((score, fidx, mask))
                 print(f"[s3] frame {fidx} {label}: candidate score={score:.3f}")
 
-        # --- strategy 1: SAM-2 box + positive fingertip point ---
+        # --- strategy 1: SAM-2 box (no positive point) ---
         for fd in frame_data:
             fidx, frame, hand_mask = fd["fidx"], fd["frame"], fd["hand_mask"]
             depth, hand_depth      = fd["depth"], fd["hand_depth"]
@@ -373,8 +373,9 @@ class ObjectSegmentationStage:
                     min(W - 1, tip_point[0] + half),
                     min(H - 1, tip_point[1] + half),
                 )
-                print(f"[s3] frame {fidx}: trying SAM-2 box+point {box} @ {tip_point}")
-                mask = self._fallback_sam2.segment_with_box_and_point(frame.image, box, tip_point)
+                print(f"[s3] frame {fidx}: trying SAM-2 box {box} "
+                      f"({box[2]-box[0]}×{box[3]-box[1]}px)")
+                mask = self._fallback_sam2.segment_with_box(frame.image, box)
                 if mask is not None and mask.any():
                     print(f"[s3] frame {fidx} SAM-2 raw mask: {int(mask.sum())} px before hand removal")
                     mask = mask & ~hand_mask
@@ -382,7 +383,7 @@ class ObjectSegmentationStage:
                         mask = _closest_depth_component(mask, depth, hand_depth, tip_point)
                     else:
                         mask = _nearest_component(mask, tip_point)
-                    _add_candidate(mask, fidx, fd, "SAM-2 box+point", tip_point)
+                    _add_candidate(mask, fidx, fd, "SAM-2 box", tip_point)
 
         # --- strategy 2: SAM-2 hand-bbox + negative MANO points ---
         for fd in frame_data:
