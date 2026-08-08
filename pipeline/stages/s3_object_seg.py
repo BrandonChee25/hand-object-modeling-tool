@@ -301,7 +301,7 @@ class ObjectSegmentationStage:
                 r=int(hand_size * 0.55), half=int(hand_size * 0.7),
             ))
 
-        # --- attempt 1: SAM-2 box (no positive point) on all frames ---
+        # --- attempt 1: SAM-2 box + positive fingertip point on all frames ---
         for fd in frame_data:
             fidx, frame, hand_mask = fd["fidx"], fd["frame"], fd["hand_mask"]
             depth, hand_depth      = fd["depth"], fd["hand_depth"]
@@ -313,9 +313,11 @@ class ObjectSegmentationStage:
                     min(W - 1, tip_point[0] + half),
                     min(H - 1, tip_point[1] + half),
                 )
-                print(f"[s3] frame {fidx}: trying SAM-2 box {box} "
-                      f"({box[2]-box[0]}×{box[3]-box[1]}px)")
-                mask = self._fallback_sam2.segment_with_box(frame.image, box)
+                print(f"[s3] frame {fidx}: trying SAM-2 box+point {box} "
+                      f"@ {tip_point} ({box[2]-box[0]}×{box[3]-box[1]}px)")
+                mask = self._fallback_sam2.segment_with_box_and_point(
+                    frame.image, box, tip_point
+                )
                 if mask is not None and mask.any():
                     print(f"[s3] frame {fidx} SAM-2 raw mask: {int(mask.sum())} px before hand removal")
                     mask = mask & ~hand_mask
@@ -441,8 +443,10 @@ class ObjectSegmentationStage:
             return False
         if depth is not None and hand_depth is not None:
             md = _median_depth(depth, mask)
-            if md is not None and md > hand_depth * 1.5:
-                print(f"[s3] frame {fidx} {label}: mask depth {md:.2f}m > hand {hand_depth:.2f}m, likely arm")
+            depth_tol = self.cfg.get("arm_depth_tolerance", 1.2)
+            if md is not None and md > hand_depth * depth_tol:
+                print(f"[s3] frame {fidx} {label}: mask depth {md:.2f}m > "
+                      f"{depth_tol}× hand {hand_depth:.2f}m, likely arm")
                 return False
         if hand_bbox is not None:
             # Require ≥50% of mask pixels to be within 1.5× the hand bbox.
