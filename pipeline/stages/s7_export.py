@@ -156,7 +156,9 @@ def _save_trajectory(data: PipelineData, output_dir: Path) -> None:
         object_mesh_faces=obj_faces,
         object_mesh_verts_metric=obj_verts_metric,
         aligned_hand_verts=aligned_hand_verts,
-        anchor_frame_idx=np.int32(seed_idx),
+        # Must match the frame used for Stage 6 hand alignment (data.anchor_index),
+        # not the segmentation seed frame — the viewer uses this to zero the FP delta.
+        anchor_frame_idx=np.int32(data.anchor_index),
     )
     print(f"[s7] saved trajectory.npz  ({T} frames, {out_path.stat().st_size // 1024} KB)")
 
