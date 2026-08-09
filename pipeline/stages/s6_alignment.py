@@ -30,23 +30,32 @@ class AlignmentStage:
         self.cfg = cfg
 
     def run(self, data: PipelineData) -> PipelineData:
-        anchor_hand = next(
-            r for r in data.hand_results if r.frame_index == data.anchor_index
-        )
-        # Object mask comes from the SAM-2 seed frame, not necessarily the hand anchor.
-        seed_idx = data.object_seg.anchor_frame_index
+        # Use the segmentation seed frame as the single reference for everything:
+        # FP is registered (most accurate) there, the object mask is from there,
+        # and Stage 7 anchors the viewer's hand delta at that frame.
+        seed_idx   = data.object_seg.anchor_frame_index
         anchor_mask = data.object_seg.masks[seed_idx]
+        seed_depth  = data.depth_maps.get(seed_idx, data.depth_map)
 
-        # --- hand position and scale from MoGe depth + YOLO bbox ---
-        # WiLoR's translation is over-scaled; use MoGe depth at the hand bbox centre
-        # instead so that hand and object live in the same metric coordinate system.
-        anchor_frame = data.frames[data.anchor_index]
+        # WiLoR result at the seed frame; fall back to the hand anchor if missing.
+        hand_results_by_frame = {r.frame_index: r for r in data.hand_results}
+        anchor_hand = (
+            hand_results_by_frame.get(seed_idx)
+            or hand_results_by_frame.get(data.anchor_index)
+        )
+        if anchor_hand is None:
+            raise RuntimeError("No WiLoR hand result found at seed or anchor frame.")
+
+        # Hand bbox: prefer seed frame, fall back to hand anchor frame.
+        seed_frame   = data.frames[seed_idx]
+        ref_frame    = seed_frame if seed_frame.hand_bbox is not None else data.frames[data.anchor_index]
+
         K = data.camera_intrinsics
         fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
-        H_img, W_img = data.depth_map.shape
+        H_img, W_img = seed_depth.shape
 
-        if anchor_frame.hand_bbox is not None:
-            x1, y1, x2, y2 = anchor_frame.hand_bbox.astype(int)
+        if ref_frame.hand_bbox is not None:
+            x1, y1, x2, y2 = ref_frame.hand_bbox.astype(int)
             hx = int(np.clip((x1 + x2) / 2, 0, W_img - 1))
             hy = int(np.clip((y1 + y2) / 2, 0, H_img - 1))
         else:
@@ -55,9 +64,9 @@ class AlignmentStage:
         # Sample depth in a small patch around the bbox centre.
         py0, py1 = max(0, hy - 20), min(H_img, hy + 20)
         px0, px1 = max(0, hx - 20), min(W_img, hx + 20)
-        patch = data.depth_map[py0:py1, px0:px1]
+        patch = seed_depth[py0:py1, px0:px1]
         valid = patch[np.isfinite(patch) & (patch > 0)]
-        hand_depth = float(np.median(valid)) if len(valid) > 0 else float(data.depth_map[hy, hx])
+        hand_depth = float(np.median(valid)) if len(valid) > 0 else float(seed_depth[hy, hx])
 
         # Backproject bbox centre to 3D.
         c_hand = np.array([
@@ -67,7 +76,7 @@ class AlignmentStage:
         ], dtype=np.float32)
 
         # Scale MANO vertices to metric using bbox apparent size at that depth.
-        if anchor_frame.hand_bbox is not None:
+        if ref_frame.hand_bbox is not None:
             bbox_diag_px = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
             hand_metric_size = bbox_diag_px * hand_depth / fx
         else:
@@ -81,9 +90,6 @@ class AlignmentStage:
         hand_verts_cam = c_hand + hand_scale * (anchor_hand.vertices - mano_center)
 
         # --- object point cloud in MoGe metric space ---
-        # Use the depth map for the seed frame, not the hand anchor frame, so
-        # the mask pixels (which belong to seed_idx) are lifted at the correct depth.
-        seed_depth = data.depth_maps.get(seed_idx, data.depth_map)
         obj_points = depth_lift_mask(
             seed_depth,
             anchor_mask,
@@ -98,8 +104,7 @@ class AlignmentStage:
 
         c_obj = obj_points.mean(axis=0)  # (3,) in MoGe space
 
-        # --- scale TripoSR canonical mesh to metric size ---
-        # Estimate object metric diameter from its mask pixel extent and MoGe depth.
+        # --- scale canonical mesh to metric size ---
         ys_mask, xs_mask = np.where(anchor_mask)
         mask_diag_px = np.sqrt((xs_mask.max() - xs_mask.min()) ** 2 +
                                (ys_mask.max() - ys_mask.min()) ** 2)
@@ -121,13 +126,11 @@ class AlignmentStage:
         )
 
         if fp_path:
-            # FoundationPose: use the hand anchor frame's pose so that the object
-            # and hand are expressed in the same camera coordinate system.
-            # seed_idx may differ from data.anchor_index when the best segmentation
-            # frame is not the hand anchor; using seed_idx here would place the
-            # object in a different camera space than the hand.
-            R_aligned = np.array(data.object_poses.rots[data.anchor_index], dtype=np.float64)
-            t_fp = np.array(data.object_poses.trans[data.anchor_index], dtype=np.float64)
+            # Use the seed frame's FP pose: this is where FP ran registration,
+            # so it is the most accurate estimate. hand_verts_cam is also derived
+            # from the seed frame, so both are in the same camera coordinate system.
+            R_aligned = np.array(data.object_poses.rots[seed_idx], dtype=np.float64)
+            t_fp = np.array(data.object_poses.trans[seed_idx], dtype=np.float64)
         else:
             R_aligned, t_fp = _consensus_pose(data)
 
