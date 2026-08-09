@@ -72,6 +72,7 @@ class SAM3DModel:
         mask: np.ndarray,
         camera_intrinsics: np.ndarray,
         seed: int = 42,
+        flip_axes: str = "yz",
     ) -> dict:
         """Reconstruct a 3D mesh from a single masked object crop.
 
@@ -127,11 +128,21 @@ class SAM3DModel:
         vertices, faces = self._extract_mesh(result)
         canonical_rot, canonical_trans = self._extract_pose(result)
 
-        # SAM-3D generates geometry in OpenGL convention (Y-up, Z-backward).
-        # FP and MoGe use OpenCV convention (Y-down, Z-forward).
-        # Convert: negate Y and Z, equivalent to a 180° rotation around X.
-        vertices[:, 1] *= -1
-        vertices[:, 2] *= -1
+        # Axis-flip to convert SAM-3D's coordinate convention to OpenCV (Y-down, Z-forward).
+        # Default "yz": negate Y and Z = 180° around X (OpenGL→OpenCV).
+        # Change object_mesh_flip_axes in config to try other combinations.
+        axes = set(flip_axes.lower())
+        if "x" in axes:
+            vertices[:, 0] *= -1
+        if "y" in axes:
+            vertices[:, 1] *= -1
+        if "z" in axes:
+            vertices[:, 2] *= -1
+        print(f"[sam3d] applied flip_axes={flip_axes!r}  "
+              f"vertex range after flip: "
+              f"X=[{vertices[:,0].min():.3f},{vertices[:,0].max():.3f}] "
+              f"Y=[{vertices[:,1].min():.3f},{vertices[:,1].max():.3f}] "
+              f"Z=[{vertices[:,2].min():.3f},{vertices[:,2].max():.3f}]")
 
         vertices -= vertices.mean(0)
 

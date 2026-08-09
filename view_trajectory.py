@@ -52,23 +52,57 @@ def hand_verts_in_camera(data: dict, i: int) -> np.ndarray:
     return (R @ (verts - center).T).T + t
 
 
-def object_verts_in_camera(data: dict, i: int) -> np.ndarray:
+def object_verts_in_camera(data: dict, i: int, extra_flip: str = "") -> np.ndarray:
     # Use the metric-scaled, origin-centred mesh when available so that FP's
     # (R, t) pose places the object at the correct size and depth.
     verts = (data["object_mesh_verts_metric"]
              if "object_mesh_verts_metric" in data
-             else data["object_mesh_vertices"])
+             else data["object_mesh_vertices"]).copy()
+
+    # Optional diagnostic pre-flip applied before FP's rotation.
+    # Useful for identifying the correct flip without re-running the pipeline.
+    axes = set(extra_flip.lower())
+    if "x" in axes:
+        verts[:, 0] *= -1
+    if "y" in axes:
+        verts[:, 1] *= -1
+    if "z" in axes:
+        verts[:, 2] *= -1
+
     R = data["object_rots"][i]
     t = data["object_trans"][i]
 
     return (R @ verts.T).T + t
 
 
-def build_figure(data: dict, every: int, fps: float):
+def _hand_trace(hv: np.ndarray, hand_faces: np.ndarray | None, **kwargs) -> object:
+    import plotly.graph_objects as go
+    if hand_faces is not None:
+        return go.Mesh3d(
+            x=hv[:, 0], y=hv[:, 1], z=hv[:, 2],
+            i=hand_faces[:, 0], j=hand_faces[:, 1], k=hand_faces[:, 2],
+            color="rgb(210, 180, 140)",
+            opacity=0.6,
+            flatshading=True,
+            lighting=dict(ambient=0.5, diffuse=0.7, specular=0.1),
+            name="Hand",
+            **kwargs,
+        )
+    return go.Scatter3d(
+        x=hv[:, 0], y=hv[:, 1], z=hv[:, 2],
+        mode="markers",
+        marker=dict(size=2, color="rgb(210, 180, 140)", opacity=0.8),
+        name="Hand",
+        **kwargs,
+    )
+
+
+def build_figure(data: dict, every: int, fps: float, obj_flip: str = ""):
     import plotly.graph_objects as go
 
     T           = len(data["frame_indices"])
     obj_faces   = data["object_mesh_faces"]
+    hand_faces  = data.get("hand_mesh_faces")  # None for old NPZ files
     frame_idxs  = data["frame_indices"]
 
     frames = []
@@ -76,14 +110,9 @@ def build_figure(data: dict, every: int, fps: float):
 
     for i in range(0, T, every):
         hv = hand_verts_in_camera(data, i)
-        ov = object_verts_in_camera(data, i)
+        ov = object_verts_in_camera(data, i, extra_flip=obj_flip)
 
-        hand_trace = go.Scatter3d(
-            x=hv[:, 0], y=hv[:, 1], z=hv[:, 2],
-            mode="markers",
-            marker=dict(size=2, color="rgb(210, 180, 140)", opacity=0.8),
-            name="Hand",
-        )
+        hand_trace = _hand_trace(hv, hand_faces)
         obj_trace = go.Mesh3d(
             x=ov[:, 0], y=ov[:, 1], z=ov[:, 2],
             i=obj_faces[:, 0], j=obj_faces[:, 1], k=obj_faces[:, 2],
@@ -104,16 +133,11 @@ def build_figure(data: dict, every: int, fps: float):
 
     # Initial traces
     hv0 = hand_verts_in_camera(data, 0)
-    ov0 = object_verts_in_camera(data, 0)
+    ov0 = object_verts_in_camera(data, 0, extra_flip=obj_flip)
 
     fig = go.Figure(
         data=[
-            go.Scatter3d(
-                x=hv0[:, 0], y=hv0[:, 1], z=hv0[:, 2],
-                mode="markers",
-                marker=dict(size=2, color="rgb(210, 180, 140)", opacity=0.8),
-                name="Hand",
-            ),
+            _hand_trace(hv0, hand_faces),
             go.Mesh3d(
                 x=ov0[:, 0], y=ov0[:, 1], z=ov0[:, 2],
                 i=obj_faces[:, 0], j=obj_faces[:, 1], k=obj_faces[:, 2],
@@ -171,13 +195,19 @@ def main() -> None:
                         help="Only include every Nth frame (default: 1 = all frames)")
     parser.add_argument("--fps", type=float, default=6.0,
                         help="Playback speed in frames per second (default: 6)")
+    parser.add_argument("--obj-flip", default="",
+                        help="Diagnostic: axes to negate on canonical object mesh before FP rotation "
+                             "(e.g. 'x', 'xz', 'y'). Does not re-run FP — useful for identifying "
+                             "the right flip to set in config/default.yaml object_mesh_flip_axes.")
     args = parser.parse_args()
 
     data = {k: v for k, v in np.load(args.npz).items()}
     T    = len(data["frame_indices"])
     print(f"Loaded {T} frames from {args.npz}")
+    if args.obj_flip:
+        print(f"[viewer] applying diagnostic obj-flip={args.obj_flip!r} to canonical mesh")
 
-    fig = build_figure(data, every=args.every, fps=args.fps)
+    fig = build_figure(data, every=args.every, fps=args.fps, obj_flip=args.obj_flip)
 
     out = args.out or args.npz.with_suffix(".html")
     fig.write_html(str(out), auto_play=False)

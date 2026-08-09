@@ -139,6 +139,8 @@ def _save_trajectory(data: PipelineData, output_dir: Path) -> None:
         else np.zeros((778, 3), dtype=np.float32)
     )
 
+    import utils.geometry as _geom
+
     out_path = output_dir / "trajectory.npz"
     np.savez_compressed(
         out_path,
@@ -156,6 +158,7 @@ def _save_trajectory(data: PipelineData, output_dir: Path) -> None:
         object_mesh_faces=obj_faces,
         object_mesh_verts_metric=obj_verts_metric,
         aligned_hand_verts=aligned_hand_verts,
+        hand_mesh_faces=_geom.MANO_FACES.astype(np.int32),
         # Must match the seed frame used for Stage 6 hand alignment — the viewer
         # zeroes the FP delta at this frame so hand and object are co-located there.
         anchor_frame_idx=np.int32(seed_idx),

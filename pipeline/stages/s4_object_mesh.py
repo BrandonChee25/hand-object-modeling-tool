@@ -54,6 +54,7 @@ class ObjectMeshGenerationStage:
             image=cropped_image,
             mask=cropped_mask,
             camera_intrinsics=data.camera_intrinsics,
+            flip_axes=self.cfg.get("object_mesh_flip_axes", "yz"),
         )
         # result keys: "vertices", "faces", "canonical_rot", "canonical_trans"
 
