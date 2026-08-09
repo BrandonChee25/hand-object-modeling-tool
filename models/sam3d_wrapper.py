@@ -133,9 +133,6 @@ class SAM3DModel:
         vertices[:, 1] *= -1
         vertices[:, 2] *= -1
 
-        # Apply SAM-3D's canonical rotation so FP receives the mesh in
-        # approximately the correct camera-space orientation.
-        vertices = (canonical_rot @ vertices.T).T
         vertices -= vertices.mean(0)
 
         return {
