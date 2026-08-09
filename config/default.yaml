@@ -32,6 +32,11 @@ arm_depth_tolerance: 1.2        # reject masks whose median depth > this × hand
 # Other useful options to try: "xz" (180° around Y), "xy" (180° around Z), "y" (Y only).
 object_mesh_flip_axes: "xz"
 
+# Maximum triangle face count for the canonical object mesh.
+# SAM-3D can produce very dense meshes; this keeps file sizes and render times reasonable.
+# Set to 0 to disable decimation.
+max_object_mesh_faces: 5000
+
 # --- Stage 6: Alignment ---
 grip_position: 0.6        # 0=palm centre, 1=fingertips; where the object is initially placed
 max_contact_push_m: 0.10  # safety cap on how far the object can be pushed to clear the hand mesh

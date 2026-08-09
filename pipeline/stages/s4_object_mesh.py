@@ -58,9 +58,22 @@ class ObjectMeshGenerationStage:
         )
         # result keys: "vertices", "faces", "canonical_rot", "canonical_trans"
 
+        vertices = result["vertices"]
+        faces    = result["faces"]
+        print(f"[s4] SAM-3D mesh: {len(vertices)} verts, {len(faces)} faces")
+
+        max_faces = int(self.cfg.get("max_object_mesh_faces", 5000))
+        if max_faces > 0 and len(faces) > max_faces:
+            import trimesh
+            mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+            mesh = mesh.simplify_quadric_decimation(max_faces)
+            vertices = np.array(mesh.vertices, dtype=np.float32)
+            faces    = np.array(mesh.faces,    dtype=np.int32)
+            print(f"[s4] decimated to {len(vertices)} verts, {len(faces)} faces")
+
         data.object_mesh = ObjectMesh(
-            vertices=result["vertices"],
-            faces=result["faces"],
+            vertices=vertices,
+            faces=faces,
             canonical_rot=result["canonical_rot"],
             canonical_trans=result["canonical_trans"],
         )
