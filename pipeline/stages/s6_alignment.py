@@ -81,8 +81,11 @@ class AlignmentStage:
         hand_verts_cam = c_hand + hand_scale * (anchor_hand.vertices - mano_center)
 
         # --- object point cloud in MoGe metric space ---
+        # Use the depth map for the seed frame, not the hand anchor frame, so
+        # the mask pixels (which belong to seed_idx) are lifted at the correct depth.
+        seed_depth = data.depth_maps.get(seed_idx, data.depth_map)
         obj_points = depth_lift_mask(
-            data.depth_map,
+            seed_depth,
             anchor_mask,
             data.camera_intrinsics,
         )  # (N, 3)
@@ -118,12 +121,13 @@ class AlignmentStage:
         )
 
         if fp_path:
-            # FoundationPose: use anchor frame pose directly.
-            # Each frame's pose is in that frame's camera space, so averaging
-            # across frames gives a meaningless translation when the camera moves.
-            anchor_idx = data.object_seg.anchor_frame_index
-            R_aligned = np.array(data.object_poses.rots[anchor_idx], dtype=np.float64)
-            t_fp = np.array(data.object_poses.trans[anchor_idx], dtype=np.float64)
+            # FoundationPose: use the hand anchor frame's pose so that the object
+            # and hand are expressed in the same camera coordinate system.
+            # seed_idx may differ from data.anchor_index when the best segmentation
+            # frame is not the hand anchor; using seed_idx here would place the
+            # object in a different camera space than the hand.
+            R_aligned = np.array(data.object_poses.rots[data.anchor_index], dtype=np.float64)
+            t_fp = np.array(data.object_poses.trans[data.anchor_index], dtype=np.float64)
         else:
             R_aligned, t_fp = _consensus_pose(data)
 
