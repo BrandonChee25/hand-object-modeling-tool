@@ -20,9 +20,9 @@ import numpy as np
 
 
 def hand_verts_in_camera(data: dict, i: int) -> np.ndarray:
-    # Global motion comes from FP's object translation delta (hand and object move
-    # rigidly together). Local articulation (finger shape) comes from WiLoR's
-    # centroid-relative vertex change, scaled to metric units.
+    # Hand and object are rigidly coupled (hand grips object), so the hand undergoes
+    # the same 6-DOF rigid-body motion as FP tracks for the object.  Local finger
+    # articulation (shape change) is added on top of that global motion.
     if "aligned_hand_verts" in data:
         aligned    = data["aligned_hand_verts"]              # metric, anchor frame
         anchor_idx = int(data["anchor_frame_idx"])
@@ -32,16 +32,26 @@ def hand_verts_in_camera(data: dict, i: int) -> np.ndarray:
         met_span = float(np.linalg.norm(aligned.max(0) - aligned.min(0)))
         scale    = met_span / max(raw_span, 1e-6)
 
-        # Global translation from FP tracking
-        fp_delta = data["object_trans"][i] - data["object_trans"][anchor_idx]
+        # FP's per-frame object pose gives the full 6-DOF rigid-body motion.
+        R_anchor = data["object_rots"][anchor_idx]       # (3, 3)
+        R_i      = data["object_rots"][i]                # (3, 3)
+        R_rel    = R_i @ R_anchor.T                      # rotation since anchor frame
+        t_anchor = data["object_trans"][anchor_idx]      # (3,)
+        t_i      = data["object_trans"][i]               # (3,)
 
-        # Articulation: centroid-relative finger shape change in WiLoR space
-        anchor_c  = anchor_raw.mean(0)
-        verts_i   = data["hand_vertices"][i]
-        verts_i_c = verts_i.mean(0)
-        articulation = scale * ((verts_i - verts_i_c) - (anchor_raw - anchor_c))
+        # Apply the same rigid transform to the hand: rotate around the object centroid
+        # (t_anchor) then translate to t_i.
+        hand_global = (R_rel @ (aligned - t_anchor).T).T + t_i
 
-        return aligned + fp_delta + articulation
+        # Articulation: per-frame finger shape change from WiLoR, scaled to metric.
+        # Expressed in anchor-frame camera space; rotate to the current frame orientation.
+        anchor_c     = anchor_raw.mean(0)
+        verts_i      = data["hand_vertices"][i]
+        verts_i_c    = verts_i.mean(0)
+        shape_change = scale * ((verts_i - verts_i_c) - (anchor_raw - anchor_c))
+        articulation = (R_rel @ shape_change.T).T
+
+        return hand_global + articulation
 
     # Legacy fallback (WiLoR coordinate space — only correct if hand_translation
     # happens to be in the same metric camera space as the object poses).
