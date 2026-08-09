@@ -136,6 +136,12 @@ class AlignmentStage:
 
         fp_trans_valid = fp_path and float(np.linalg.norm(t_fp)) > 0.05
 
+        # c_obj is the depth-lifted object centroid — an independent 3D position
+        # estimate from MoGe depth + mask, unaffected by FP registration accuracy.
+        print(f"[s6] c_obj (depth-lift)={c_obj.tolist()}")
+        if fp_trans_valid:
+            print(f"[s6] t_fp (FP)={t_fp.tolist()}  |c_obj-t_fp|={float(np.linalg.norm(c_obj - t_fp.astype(np.float32))):.3f}m")
+
         # Shift hand mesh so its grip centre lands on the object centroid (t_fp).
         # hand_verts_cam is initially centred at c_hand (hand bbox centre), but the
         # object is near the fingertips/grip, not the palm centre — so there is a
@@ -147,6 +153,8 @@ class AlignmentStage:
             print(f"[s6] c_hand={c_hand.tolist()}  grip_centre={grip_center_cam.tolist()}")
             print(f"[s6] t_fp={t_fp.tolist()}  grip_shift={grip_shift.tolist()}  "
                   f"|shift|={float(np.linalg.norm(grip_shift)):.3f}m")
+            print(f"[s6] hand_scale={hand_scale:.4f}  hand_depth={hand_depth:.3f}m  "
+                  f"finger_dist={float(np.linalg.norm(finger_center_cam - grip_shift - c_hand)):.3f}m")
         else:
             print(f"[s6] FP translation invalid, using grip heuristic")
 
@@ -160,7 +168,10 @@ class AlignmentStage:
         obj_center_cam = t_fp if fp_trans_valid else grip_center_cam
         obj_verts_aligned = obj_center_cam + obj_scale * (obj_verts_posed - canon_center)
 
+        print(f"[s6] obj_scale={obj_scale:.4f}  obj_center_before_resolve={obj_center_cam.tolist()}")
+
         # Push out any residual penetration into the hand mesh.
+        obj_verts_pre = obj_verts_aligned.copy()
         obj_verts_aligned = _resolve_penetration(
             hand_verts_cam,
             _geom.MANO_FACES,
@@ -168,6 +179,8 @@ class AlignmentStage:
             fallback_dir=finger_center_cam - (hand_verts_cam.mean(0)),
             max_push=self.cfg.get("max_contact_push_m", 0.05),
         )
+        push_delta = obj_verts_aligned.mean(0) - obj_verts_pre.mean(0)
+        print(f"[s6] penetration_push={push_delta.tolist()}  |push|={float(np.linalg.norm(push_delta)):.3f}m")
 
         # Identity world-from-camera (we keep camera as world for simplicity).
         world_from_camera = np.eye(4)

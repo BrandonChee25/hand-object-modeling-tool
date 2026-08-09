@@ -30,7 +30,7 @@ arm_depth_tolerance: 1.2        # reject masks whose median depth > this × hand
 # Axes to negate when converting SAM-3D's output to OpenCV camera convention.
 # "yz" = negate Y and Z (default: 180° around X, OpenGL→OpenCV).
 # Other useful options to try: "xz" (180° around Y), "xy" (180° around Z), "y" (Y only).
-object_mesh_flip_axes: "yz"
+object_mesh_flip_axes: "xz"
 
 # --- Stage 6: Alignment ---
 grip_position: 0.6        # 0=palm centre, 1=fingertips; where the object is initially placed
