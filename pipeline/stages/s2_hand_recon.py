@@ -56,7 +56,7 @@ class HandReconstructionStage:
 
             metric_trans = _rescale_translation(
                 out["translation"],
-                out["vertices"],
+                out["keypoints_3d"],
                 frame_depth if frame.index == anchor.index else None,
                 K,
             )
@@ -77,31 +77,32 @@ class HandReconstructionStage:
 
 def _rescale_translation(
     raw_trans: np.ndarray,
-    vertices: np.ndarray,
+    keypoints_3d: np.ndarray,
     depth_map: np.ndarray | None,
     K: np.ndarray,
 ) -> np.ndarray:
     """Align MANO root translation to MoGe metric depth via fingertip reprojection.
 
     WiLoR outputs translation up to an unknown scale. We solve for the scale
-    factor by minimising reprojection error of fingertip vertices against the
-    corresponding depth-lifted 3D points from MoGe.  If depth_map is None
-    (non-anchor frame) we return raw_trans unchanged as a fallback.
+    factor by minimising reprojection error of fingertip keypoints against the
+    corresponding depth values from MoGe.  If depth_map is None (non-anchor
+    frame) we return raw_trans unchanged as a fallback.
     """
     if depth_map is None:
         return raw_trans
 
-    # Fingertip vertex indices in the MANO topology (thumb to pinky).
-    FINGERTIP_IDX = [745, 317, 444, 556, 673]
+    # Tip joints in the MANO 21-keypoint skeleton (index, middle, ring, pinky, thumb tips).
+    FINGERTIP_KP_IDX = [4, 8, 12, 16, 20]
 
     fx, fy = K[0, 0], K[1, 1]
     cx, cy = K[0, 2], K[1, 2]
     H, W = depth_map.shape
 
     scales = []
-    for vi in FINGERTIP_IDX:
-        x3d, y3d, z3d = vertices[vi]
-        # Project vertex to pixel
+    for ki in FINGERTIP_KP_IDX:
+        x3d, y3d, z3d = keypoints_3d[ki]
+        if z3d <= 0:
+            continue
         u = int(round(x3d * fx / z3d + cx))
         v = int(round(y3d * fy / z3d + cy))
         if 0 <= u < W and 0 <= v < H and depth_map[v, u] > 0:

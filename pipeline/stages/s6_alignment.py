@@ -114,8 +114,12 @@ class AlignmentStage:
         canon_diag = np.linalg.norm(canon_verts.max(0) - canon_verts.min(0))
         obj_scale = obj_metric_diag / max(canon_diag, 1e-6)
 
-        FINGERTIP_IDX = [745, 317, 444, 556, 673]  # thumb to pinky in MANO topology
-        finger_center_local = anchor_hand.vertices[FINGERTIP_IDX].mean(axis=0)
+        # Use WiLoR's 21-joint keypoints for fingertip positions (indices 4,8,12,16,20
+        # are the tip joints in the MANO 21-keypoint skeleton: index, middle, ring,
+        # pinky, thumb tips). This is more reliable than guessing MANO vertex indices.
+        FINGERTIP_KP_IDX = [4, 8, 12, 16, 20]
+        kps = anchor_hand.keypoints_3d  # (21, 3) in same local space as vertices
+        finger_center_local = kps[FINGERTIP_KP_IDX].mean(axis=0)
         finger_center_cam = c_hand + hand_scale * (finger_center_local - mano_center)
         grip_pos = self.cfg.get("grip_position", 0.6)
         grip_center_cam = c_hand + grip_pos * (finger_center_cam - c_hand)
@@ -153,8 +157,10 @@ class AlignmentStage:
             print(f"[s6] c_hand={c_hand.tolist()}  grip_centre={grip_center_cam.tolist()}")
             print(f"[s6] t_fp={t_fp.tolist()}  grip_shift={grip_shift.tolist()}  "
                   f"|shift|={float(np.linalg.norm(grip_shift)):.3f}m")
+            tip_dists_local = [float(np.linalg.norm(kps[i] - kps[0])) for i in FINGERTIP_KP_IDX]
             print(f"[s6] hand_scale={hand_scale:.4f}  hand_depth={hand_depth:.3f}m  "
                   f"finger_dist={float(np.linalg.norm(finger_center_cam - grip_shift - c_hand)):.3f}m")
+            print(f"[s6] kp tip distances from wrist (local): {[f'{d:.3f}' for d in tip_dists_local]}")
         else:
             print(f"[s6] FP translation invalid, using grip heuristic")
 
