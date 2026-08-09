@@ -134,12 +134,30 @@ class AlignmentStage:
         else:
             R_aligned, t_fp = _consensus_pose(data)
 
+        fp_trans_valid = fp_path and float(np.linalg.norm(t_fp)) > 0.05
+
+        # Shift hand mesh so its grip centre lands on the object centroid (t_fp).
+        # hand_verts_cam is initially centred at c_hand (hand bbox centre), but the
+        # object is near the fingertips/grip, not the palm centre — so there is a
+        # structural offset that this corrects.
+        if fp_trans_valid:
+            grip_shift = t_fp.astype(np.float32) - grip_center_cam
+            hand_verts_cam = hand_verts_cam + grip_shift
+            finger_center_cam = finger_center_cam + grip_shift
+            print(f"[s6] c_hand={c_hand.tolist()}  grip_centre={grip_center_cam.tolist()}")
+            print(f"[s6] t_fp={t_fp.tolist()}  grip_shift={grip_shift.tolist()}  "
+                  f"|shift|={float(np.linalg.norm(grip_shift)):.3f}m")
+        else:
+            print(f"[s6] FP translation invalid, using grip heuristic")
+
+        from scipy.spatial.transform import Rotation as _Rot
+        euler = _Rot.from_matrix(R_aligned).as_euler("xyz", degrees=True)
+        print(f"[s6] FP R_seed Euler (xyz deg): {euler.tolist()}")
+
         obj_verts_posed = canon_verts @ R_aligned.T
         canon_center = obj_verts_posed.mean(axis=0)
 
-        fp_trans_valid = fp_path and float(np.linalg.norm(t_fp)) > 0.05
         obj_center_cam = t_fp if fp_trans_valid else grip_center_cam
-
         obj_verts_aligned = obj_center_cam + obj_scale * (obj_verts_posed - canon_center)
 
         # Push out any residual penetration into the hand mesh.
@@ -147,7 +165,7 @@ class AlignmentStage:
             hand_verts_cam,
             _geom.MANO_FACES,
             obj_verts_aligned,
-            fallback_dir=finger_center_cam - c_hand,
+            fallback_dir=finger_center_cam - (hand_verts_cam.mean(0)),
             max_push=self.cfg.get("max_contact_push_m", 0.05),
         )
 
