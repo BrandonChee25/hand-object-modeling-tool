@@ -127,9 +127,14 @@ class SAM3DModel:
         vertices, faces = self._extract_mesh(result)
         canonical_rot, canonical_trans = self._extract_pose(result)
 
-        # Pre-rotate by SAM-3D's canonical rotation so FP receives the mesh in
-        # approximately the correct camera-space orientation.  Without this, FP
-        # works against SAM-3D's arbitrary canonical frame and produces wrong angles.
+        # SAM-3D generates geometry in OpenGL convention (Y-up, Z-backward).
+        # FP and MoGe use OpenCV convention (Y-down, Z-forward).
+        # Convert: negate Y and Z, equivalent to a 180° rotation around X.
+        vertices[:, 1] *= -1
+        vertices[:, 2] *= -1
+
+        # Apply SAM-3D's canonical rotation so FP receives the mesh in
+        # approximately the correct camera-space orientation.
         vertices = (canonical_rot @ vertices.T).T
         vertices -= vertices.mean(0)
 
