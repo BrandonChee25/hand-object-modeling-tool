@@ -64,11 +64,7 @@ class ObjectMeshGenerationStage:
 
         max_faces = int(self.cfg.get("max_object_mesh_faces", 5000))
         if max_faces > 0 and len(faces) > max_faces:
-            import trimesh
-            mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
-            mesh = mesh.simplify_quadric_decimation(max_faces)
-            vertices = np.array(mesh.vertices, dtype=np.float32)
-            faces    = np.array(mesh.faces,    dtype=np.int32)
+            vertices, faces = _decimate(vertices, faces, max_faces)
             print(f"[s4] decimated to {len(vertices)} verts, {len(faces)} faces")
 
         data.object_mesh = ObjectMesh(
@@ -78,3 +74,31 @@ class ObjectMeshGenerationStage:
             canonical_trans=result["canonical_trans"],
         )
         return data
+
+
+def _decimate(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    max_faces: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Reduce face count, trying available backends in order."""
+    import trimesh
+
+    mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+
+    # 1. fast_simplification (trimesh default)
+    try:
+        mesh = mesh.simplify_quadric_decimation(max_faces)
+        return np.array(mesh.vertices, dtype=np.float32), np.array(mesh.faces, dtype=np.int32)
+    except (ImportError, ModuleNotFoundError):
+        pass
+
+    # 2. Random face subsampling — no quality guarantees but never crashes
+    print(f"[s4] WARNING: no decimation library found; using random face subsampling")
+    rng  = np.random.default_rng(0)
+    keep = rng.choice(len(faces), max_faces, replace=False)
+    kept_faces = faces[keep]
+    used = np.unique(kept_faces)
+    vmap = np.full(len(vertices), -1, dtype=np.int32)
+    vmap[used] = np.arange(len(used), dtype=np.int32)
+    return vertices[used], vmap[kept_faces]
