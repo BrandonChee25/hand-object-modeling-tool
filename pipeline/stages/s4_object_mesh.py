@@ -86,10 +86,18 @@ def _decimate(
 
     mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
 
-    # 1. fast_simplification (trimesh default)
+    # 1. fast_simplification — call directly; trimesh's wrapper passes target_count
+    #    which older versions don't support (they only accept target_reduction 0-1).
     try:
-        mesh = mesh.simplify_quadric_decimation(max_faces)
-        return np.array(mesh.vertices, dtype=np.float32), np.array(mesh.faces, dtype=np.int32)
+        from fast_simplification import simplify as _fs_simplify
+        target_reduction = 1.0 - max_faces / len(faces)
+        target_reduction = float(np.clip(target_reduction, 0.0, 0.99))
+        vf, ff = _fs_simplify(
+            np.array(mesh.vertices, dtype=np.float32),
+            np.array(mesh.faces,    dtype=np.int32),
+            target_reduction=target_reduction,
+        )
+        return vf.astype(np.float32), ff.astype(np.int32)
     except (ImportError, ModuleNotFoundError):
         pass
 
