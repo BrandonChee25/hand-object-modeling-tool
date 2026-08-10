@@ -138,6 +138,13 @@ class AlignmentStage:
         push_delta = obj_verts_aligned.mean(0) - obj_verts_pre.mean(0)
         print(f"[s6] penetration_push |push|={float(np.linalg.norm(push_delta)):.3f}m")
 
+        # Total correction applied to the object relative to raw FP translation:
+        # grip alignment already put obj_center at t_fp, so only push_delta matters.
+        if fp_trans_valid:
+            data.object_anchor_correction = push_delta.astype(np.float32)
+        else:
+            data.object_anchor_correction = np.zeros(3, dtype=np.float32)
+
         # Identity world-from-camera (we keep camera as world for simplicity).
         world_from_camera = np.eye(4)
 

@@ -83,6 +83,13 @@ def _save_trajectory(data: PipelineData, output_dir: Path) -> None:
     object_rots  = np.stack(data.object_poses.rots).astype(np.float32)   # (T, 3, 3)
     object_trans = np.stack(data.object_poses.trans).astype(np.float32)  # (T, 3)
 
+    # Apply the rigid correction Stage 6 computed (grip alignment + penetration push)
+    # to every frame so the viewer trajectory matches the static aligned scene.
+    if data.object_anchor_correction is not None:
+        corr = data.object_anchor_correction.astype(np.float32)
+        object_trans = object_trans + corr
+        print(f"[s7] object_trans correction={corr.tolist()}")
+
     # --- hand trajectory from Stage 2, ordered by frame index ---
     hand_by_frame = {r.frame_index: r for r in data.hand_results}
 

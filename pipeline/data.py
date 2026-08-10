@@ -83,3 +83,7 @@ class PipelineData:
     object_mesh: Optional[ObjectMesh] = None
     object_poses: Optional[ObjectPoseSequence] = None
     aligned_scene: Optional[AlignedScene] = None
+    # (3,) rigid offset applied to the object at the anchor frame by Stage 6
+    # (grip alignment + penetration push).  Stage 7 adds this to every object_trans
+    # so the viewer trajectory matches the static aligned scene.
+    object_anchor_correction: Optional[np.ndarray] = None
