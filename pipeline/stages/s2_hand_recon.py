@@ -50,16 +50,9 @@ class HandReconstructionStage:
                 frame_depth, _ = self.moge.estimate(frame.image)
                 data.depth_maps[frame.index] = frame_depth
 
-            frame_depth = data.depth_maps[frame.index]
-
             out = self.wilor.reconstruct(frame.image, frame.hand_bbox)
 
-            metric_trans = _rescale_translation(
-                out["translation"],
-                out["keypoints_3d"],
-                frame_depth if frame.index == anchor.index else None,
-                K,
-            )
+            metric_trans = out["translation"]
 
             results.append(HandResult(
                 frame_index=frame.index,
@@ -73,43 +66,3 @@ class HandReconstructionStage:
 
         data.hand_results = results
         return data
-
-
-def _rescale_translation(
-    raw_trans: np.ndarray,
-    keypoints_3d: np.ndarray,
-    depth_map: np.ndarray | None,
-    K: np.ndarray,
-) -> np.ndarray:
-    """Align MANO root translation to MoGe metric depth via fingertip reprojection.
-
-    WiLoR outputs translation up to an unknown scale. We solve for the scale
-    factor by minimising reprojection error of fingertip keypoints against the
-    corresponding depth values from MoGe.  If depth_map is None (non-anchor
-    frame) we return raw_trans unchanged as a fallback.
-    """
-    if depth_map is None:
-        return raw_trans
-
-    # Tip joints in the MANO 21-keypoint skeleton (index, middle, ring, pinky, thumb tips).
-    FINGERTIP_KP_IDX = [4, 8, 12, 16, 20]
-
-    fx, fy = K[0, 0], K[1, 1]
-    cx, cy = K[0, 2], K[1, 2]
-    H, W = depth_map.shape
-
-    scales = []
-    for ki in FINGERTIP_KP_IDX:
-        x3d, y3d, z3d = keypoints_3d[ki]
-        if z3d <= 0:
-            continue
-        u = int(round(x3d * fx / z3d + cx))
-        v = int(round(y3d * fy / z3d + cy))
-        if 0 <= u < W and 0 <= v < H and depth_map[v, u] > 0:
-            scales.append(depth_map[v, u] / z3d)
-
-    if not scales:
-        return raw_trans
-
-    scale = float(np.median(scales))
-    return raw_trans * scale

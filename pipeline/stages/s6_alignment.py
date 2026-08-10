@@ -47,35 +47,25 @@ class AlignmentStage:
         H_img, W_img = seed_depth.shape
 
         # --- hand in metric camera space ---
-        # WiLoR outputs vertices and keypoints in camera space (global rotation +
-        # translation already applied) but at WiLoR's own depth scale, not MoGe
-        # metric.  Recover the scale by comparing WiLoR's fingertip z-values with
-        # MoGe depth at the projected fingertip pixels.
+        # WiLoR outputs pred_vertices / pred_keypoints_3d in MANO local space:
+        # global orientation is already applied, but the camera-space translation
+        # is NOT included.  pred_cam_t_full (stored as anchor_hand.translation) is
+        # the metric camera-space position of the MANO root joint — adding it gives
+        # the full camera-space positions.
         FINGERTIP_KP_IDX = [4, 8, 12, 16, 20]
-        kps   = anchor_hand.keypoints_3d   # (21, 3) WiLoR camera space
-        verts = anchor_hand.vertices        # (778, 3) WiLoR camera space
+        kps        = anchor_hand.keypoints_3d               # (21, 3) MANO local
+        verts      = anchor_hand.vertices                   # (778, 3) MANO local
+        mano_trans = anchor_hand.translation.astype(np.float32)  # (3,) metric camera
 
-        depth_ratios: list[float] = []
-        for ki in FINGERTIP_KP_IDX:
-            x3d, y3d, z3d = float(kps[ki, 0]), float(kps[ki, 1]), float(kps[ki, 2])
-            if z3d <= 0:
-                continue
-            u    = int(round(x3d * fx / z3d + cx))
-            v_px = int(round(y3d * fy / z3d + cy))
-            if 0 <= u < W_img and 0 <= v_px < H_img and seed_depth[v_px, u] > 0:
-                depth_ratios.append(float(seed_depth[v_px, u]) / z3d)
-
-        wilor_to_metric = float(np.median(depth_ratios)) if depth_ratios else 1.0
-        print(f"[s6] wilor_to_metric={wilor_to_metric:.4f}  ({len(depth_ratios)} fingertip samples)")
-
-        verts_metric = (verts * wilor_to_metric).astype(np.float32)   # (778, 3) metric
-        kps_metric   = (kps   * wilor_to_metric).astype(np.float32)   # (21, 3)  metric
+        kps_metric   = (kps   + mano_trans).astype(np.float32)  # (21, 3)  camera space
+        verts_metric = (verts + mano_trans).astype(np.float32)  # (778, 3) camera space
 
         wrist_metric         = kps_metric[0]
         finger_center_metric = kps_metric[FINGERTIP_KP_IDX].mean(axis=0)
         finger_dist          = float(np.linalg.norm(finger_center_metric - wrist_metric))
-        print(f"[s6] wrist={wrist_metric.tolist()}")
-        print(f"[s6] finger_center={finger_center_metric.tolist()}  finger_dist={finger_dist:.3f}m")
+        print(f"[s6] mano_trans={mano_trans.tolist()}")
+        print(f"[s6] wrist_cam={wrist_metric.tolist()}")
+        print(f"[s6] finger_center_cam={finger_center_metric.tolist()}  finger_dist={finger_dist:.3f}m")
 
         grip_pos           = self.cfg.get("grip_position", 0.6)
         grip_center_metric = wrist_metric + grip_pos * (finger_center_metric - wrist_metric)
