@@ -106,7 +106,11 @@ def _save_trajectory(data: PipelineData, output_dir: Path) -> None:
     # For grasped objects the hand's wrist rotation (WiLoR) is more stable than
     # FP's per-frame rotation estimate.  Compute a fixed canonical offset at the
     # seed frame: R_cano = R_wilor_seed.T @ R_fp_seed.  At every subsequent frame:
-    # R_object = R_wilor_t @ R_cano.  Falls back to FP where WiLoR has no result.
+    # R_object = R_wilor_t @ R_cano.  For gaps where WiLoR has no detection,
+    # SLERP between the nearest WiLoR-bound rotations rather than dropping in the
+    # raw FP rotation (which is unrelated and causes systematic orientation jumps).
+    from scipy.spatial.transform import Rotation as _Rot, Slerp as _Slerp
+
     seed_idx  = data.object_seg.anchor_frame_index
     seed_fidx = int(frame_indices[seed_idx])
     seed_hand = hand_by_frame.get(seed_fidx)
@@ -116,15 +120,36 @@ def _save_trajectory(data: PipelineData, output_dir: Path) -> None:
         R_wilor_seed = seed_hand.global_rot.astype(np.float64)
         R_cano       = R_wilor_seed.T @ R_fp_seed
 
-        n_wilor = 0
+        wilor_mask = np.zeros(T, dtype=bool)
         for i, fidx in enumerate(frame_indices):
             hr = hand_by_frame.get(int(fidx))
             if hr is not None:
                 object_rots[i] = (hr.global_rot.astype(np.float64) @ R_cano).astype(np.float32)
-                n_wilor += 1
-            # else: FP rotation already in object_rots[i]
+                wilor_mask[i]  = True
 
-        print(f"[s7] WiLoR-bound rotation: {n_wilor}/{T} frames from WiLoR, rest from FP")
+        n_wilor = int(wilor_mask.sum())
+        print(f"[s7] WiLoR-bound rotation: {n_wilor}/{T} frames from WiLoR")
+
+        # Fill FP-fallback gaps by interpolating between surrounding WiLoR frames.
+        if n_wilor > 0 and n_wilor < T:
+            wilor_idxs = np.where(wilor_mask)[0]
+            for i in range(T):
+                if wilor_mask[i]:
+                    continue
+                before = wilor_idxs[wilor_idxs < i]
+                after  = wilor_idxs[wilor_idxs > i]
+                if len(before) == 0:
+                    object_rots[i] = object_rots[after[0]]
+                elif len(after) == 0:
+                    object_rots[i] = object_rots[before[-1]]
+                else:
+                    i0, i1 = int(before[-1]), int(after[0])
+                    t = (i - i0) / (i1 - i0)
+                    r0 = _Rot.from_matrix(object_rots[i0].astype(np.float64))
+                    r1 = _Rot.from_matrix(object_rots[i1].astype(np.float64))
+                    slerp = _Slerp([0.0, 1.0], _Rot.concatenate([r0, r1]))
+                    object_rots[i] = slerp([t]).as_matrix()[0].astype(np.float32)
+            print(f"[s7] SLERP-filled {T - n_wilor} FP-fallback frames")
     else:
         print(f"[s7] no WiLoR at seed frame {seed_fidx}; keeping FP rotations")
 
