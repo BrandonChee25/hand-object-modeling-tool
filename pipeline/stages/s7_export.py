@@ -12,7 +12,7 @@ Output layout:
 trajectory.npz arrays
 ---------------------
     frame_indices         (T,)        int32   — original frame index in source video
-    object_rots           (T, 3, 3)   float32 — object rotation in camera space
+    object_rots           (T, 3, 3)   float32 — object rotation (WiLoR-bound; FP fallback)
     object_trans          (T, 3)      float32 — object translation in camera space (metres)
     hand_global_rot       (T, 3, 3)   float32 — MANO global rotation in camera space
     hand_translation      (T, 3)      float32 — MANO root translation in camera space
@@ -79,9 +79,9 @@ def _save_trajectory(data: PipelineData, output_dir: Path) -> None:
     )
     T = len(frame_indices)
 
-    # --- object pose trajectory from Stage 5 ---
-    object_rots = np.stack(data.object_poses.rots).astype(np.float32)   # (T, 3, 3)
-    object_trans = np.stack(data.object_poses.trans).astype(np.float32) # (T, 3)
+    # --- object pose trajectory from Stage 5 (FP) ---
+    object_rots  = np.stack(data.object_poses.rots).astype(np.float32)   # (T, 3, 3)
+    object_trans = np.stack(data.object_poses.trans).astype(np.float32)  # (T, 3)
 
     # --- hand trajectory from Stage 2, ordered by frame index ---
     hand_by_frame = {r.frame_index: r for r in data.hand_results}
@@ -100,6 +100,32 @@ def _save_trajectory(data: PipelineData, output_dir: Path) -> None:
             hand_mano_pose[i]    = r.mano_pose
             hand_vertices[i]     = r.vertices
             hand_keypoints_3d[i] = r.keypoints_3d
+
+    # --- WiLoR-bound object rotation ---
+    # For grasped objects the hand's wrist rotation (WiLoR) is more stable than
+    # FP's per-frame rotation estimate.  Compute a fixed canonical offset at the
+    # seed frame: R_cano = R_wilor_seed.T @ R_fp_seed.  At every subsequent frame:
+    # R_object = R_wilor_t @ R_cano.  Falls back to FP where WiLoR has no result.
+    seed_idx  = data.object_seg.anchor_frame_index
+    seed_fidx = int(frame_indices[seed_idx])
+    seed_hand = hand_by_frame.get(seed_fidx)
+
+    if seed_hand is not None:
+        R_fp_seed    = np.array(data.object_poses.rots[seed_idx], dtype=np.float64)
+        R_wilor_seed = seed_hand.global_rot.astype(np.float64)
+        R_cano       = R_wilor_seed.T @ R_fp_seed
+
+        n_wilor = 0
+        for i, fidx in enumerate(frame_indices):
+            hr = hand_by_frame.get(int(fidx))
+            if hr is not None:
+                object_rots[i] = (hr.global_rot.astype(np.float64) @ R_cano).astype(np.float32)
+                n_wilor += 1
+            # else: FP rotation already in object_rots[i]
+
+        print(f"[s7] WiLoR-bound rotation: {n_wilor}/{T} frames from WiLoR, rest from FP")
+    else:
+        print(f"[s7] no WiLoR at seed frame {seed_fidx}; keeping FP rotations")
 
     # MANO shape is person-specific and fixed across frames; take from anchor.
     anchor_hand = hand_by_frame.get(data.anchor_index)
