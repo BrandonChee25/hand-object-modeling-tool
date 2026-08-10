@@ -65,13 +65,14 @@ class ExportStage:
         })
         combined.export(output_dir / "scene.glb")
 
-        _save_trajectory(data, output_dir, smooth_radius=int(self.cfg.get("rotation_smooth_radius", 3)))
+        _save_trajectory(data, output_dir, cfg=self.cfg, smooth_radius=int(self.cfg.get("rotation_smooth_radius", 3)))
 
         return output_dir
 
 
-def _save_trajectory(data: PipelineData, output_dir: Path, smooth_radius: int = 3) -> None:
+def _save_trajectory(data: PipelineData, output_dir: Path, cfg: dict | None = None, smooth_radius: int = 3) -> None:
     """Pack all per-frame hand and object data into trajectory.npz."""
+    cfg = cfg or {}
 
     # --- frame indices ---
     frame_indices = np.array(
@@ -113,7 +114,9 @@ def _save_trajectory(data: PipelineData, output_dir: Path, smooth_radius: int = 
     seed_fidx = int(frame_indices[seed_idx])
     seed_hand = hand_by_frame.get(seed_fidx)
 
-    if seed_hand is not None:
+    use_wilor_rot = cfg.get("wilor_bound_rotation", True)
+
+    if seed_hand is not None and use_wilor_rot:
         R_fp_seed    = np.array(data.object_poses.rots[seed_idx], dtype=np.float64)
         R_wilor_seed = seed_hand.global_rot.astype(np.float64)
         R_cano       = R_wilor_seed.T @ R_fp_seed

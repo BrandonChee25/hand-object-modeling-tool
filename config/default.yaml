@@ -41,3 +41,9 @@ max_object_mesh_faces: 5000
 grip_position: 0.6        # 0=palm centre, 1=fingertips; where the object is initially placed
 max_contact_push_m: 0.10  # safety cap on how far the object can be pushed to clear the hand mesh
 foundation_pose_dir: /gscratch/scrubbed/bchee05/FoundationPose
+
+# --- Stage 7: Export ---
+# Set to false to use raw FoundationPose rotations instead of WiLoR-bound rotations.
+# Useful for diagnosing whether WiLoR-bound or FP gives better orientation.
+wilor_bound_rotation: true
+rotation_smooth_radius: 3   # frames; 0 to disable temporal smoothing
