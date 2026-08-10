@@ -65,12 +65,12 @@ class ExportStage:
         })
         combined.export(output_dir / "scene.glb")
 
-        _save_trajectory(data, output_dir)
+        _save_trajectory(data, output_dir, smooth_radius=int(self.cfg.get("rotation_smooth_radius", 3)))
 
         return output_dir
 
 
-def _save_trajectory(data: PipelineData, output_dir: Path) -> None:
+def _save_trajectory(data: PipelineData, output_dir: Path, smooth_radius: int = 3) -> None:
     """Pack all per-frame hand and object data into trajectory.npz."""
 
     # --- frame indices ---
@@ -106,9 +106,7 @@ def _save_trajectory(data: PipelineData, output_dir: Path) -> None:
     # For grasped objects the hand's wrist rotation (WiLoR) is more stable than
     # FP's per-frame rotation estimate.  Compute a fixed canonical offset at the
     # seed frame: R_cano = R_wilor_seed.T @ R_fp_seed.  At every subsequent frame:
-    # R_object = R_wilor_t @ R_cano.  For gaps where WiLoR has no detection,
-    # SLERP between the nearest WiLoR-bound rotations rather than dropping in the
-    # raw FP rotation (which is unrelated and causes systematic orientation jumps).
+    # R_object = R_wilor_t @ R_cano.
     from scipy.spatial.transform import Rotation as _Rot, Slerp as _Slerp
 
     seed_idx  = data.object_seg.anchor_frame_index
@@ -150,6 +148,31 @@ def _save_trajectory(data: PipelineData, output_dir: Path) -> None:
                     slerp = _Slerp([0.0, 1.0], _Rot.concatenate([r0, r1]))
                     object_rots[i] = slerp([t]).as_matrix()[0].astype(np.float32)
             print(f"[s7] SLERP-filled {T - n_wilor} FP-fallback frames")
+
+        # Temporally smooth the rotation trajectory to suppress per-frame WiLoR noise.
+        # Each frame's rotation is replaced by the weighted mean of its neighbours
+        # in quaternion space (Gaussian weights, half-width = rotation_smooth_radius).
+        if smooth_radius > 0 and T > 1:
+            quats = _Rot.from_matrix(object_rots.astype(np.float64)).as_quat()  # (T, 4)
+            sigma = smooth_radius / 2.0
+            smoothed = np.empty_like(quats)
+            for i in range(T):
+                lo = max(0, i - smooth_radius)
+                hi = min(T, i + smooth_radius + 1)
+                offsets = np.arange(lo, hi) - i
+                weights = np.exp(-0.5 * (offsets / sigma) ** 2)
+                weights /= weights.sum()
+                chunk = quats[lo:hi]
+                # Flip any quaternion that points away from the reference to avoid
+                # sign-flip artefacts in the weighted average.
+                ref = quats[i]
+                signs = np.sign((chunk * ref).sum(axis=1))
+                signs[signs == 0] = 1.0
+                avg_q = (weights[:, None] * chunk * signs[:, None]).sum(axis=0)
+                avg_q /= np.linalg.norm(avg_q)
+                smoothed[i] = avg_q
+            object_rots = _Rot.from_quat(smoothed).as_matrix().astype(np.float32)
+            print(f"[s7] rotation smoothed (radius={smooth_radius} frames)")
     else:
         print(f"[s7] no WiLoR at seed frame {seed_fidx}; keeping FP rotations")
 
