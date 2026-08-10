@@ -61,9 +61,6 @@ class AlignmentStage:
         finger_dist         = float(np.linalg.norm(finger_center_local - wrist_local))
         print(f"[s6] finger_dist (MANO local)={finger_dist:.3f}m")
 
-        grip_pos           = self.cfg.get("grip_position", 0.6)
-        grip_center_metric = wrist_metric + grip_pos * (finger_center_metric - wrist_metric)
-
         # --- object point cloud in MoGe metric space ---
         obj_points = depth_lift_mask(seed_depth, anchor_mask, data.camera_intrinsics)
         if len(obj_points) < 10 or not np.all(np.isfinite(obj_points)):
