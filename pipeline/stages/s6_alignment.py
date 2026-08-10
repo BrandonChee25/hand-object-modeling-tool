@@ -48,22 +48,71 @@ class AlignmentStage:
 
         # --- hand in metric camera space ---
         # WiLoR outputs pred_vertices / pred_keypoints_3d in MANO local space:
-        # global orientation is already applied, but the camera-space translation
-        # is NOT included.  pred_cam_t_full (stored as anchor_hand.translation) is
-        # the metric camera-space position of the MANO root joint — adding it gives
-        # the full camera-space positions.
+        # global orientation applied, local positions already in metres, but NO
+        # camera-space translation.  pred_cam_t_full (anchor_hand.translation)
+        # provides the correct 2D ANGULAR direction but its depth is in WiLoR's
+        # internal focal-length units — typically ~20× larger than MoGe metric.
+        #
+        # Fix: (kps[i] + mano_trans) gives the correct 2D pixel for each keypoint
+        # (the x/z ratio is scale-invariant).  We project that to a pixel, look up
+        # MoGe metric depth, back-project to 3D, and recover the wrist position by
+        # subtracting the local wrist-relative offset — which IS already in metres.
         FINGERTIP_KP_IDX = [4, 8, 12, 16, 20]
-        kps        = anchor_hand.keypoints_3d               # (21, 3) MANO local
-        verts      = anchor_hand.vertices                   # (778, 3) MANO local
-        mano_trans = anchor_hand.translation.astype(np.float32)  # (3,) metric camera
+        kps        = anchor_hand.keypoints_3d                    # (21, 3) MANO local
+        verts      = anchor_hand.vertices                        # (778, 3) MANO local
+        mano_trans = anchor_hand.translation.astype(np.float32) # (3,) WiLoR cam-space
 
-        kps_metric   = (kps   + mano_trans).astype(np.float32)  # (21, 3)  camera space
-        verts_metric = (verts + mano_trans).astype(np.float32)  # (778, 3) camera space
+        probe_indices = [0] + list(FINGERTIP_KP_IDX)   # wrist + 5 fingertips
+        implied_wrists: list[np.ndarray] = []
+
+        for ki in probe_indices:
+            kp_wilor = kps[ki] + mano_trans     # correct angle, wrong depth scale
+            z_wilor  = float(kp_wilor[2])
+            if z_wilor <= 1e-3:
+                continue
+            u_kp = float(kp_wilor[0]) * fx / z_wilor + cx
+            v_kp = float(kp_wilor[1]) * fy / z_wilor + cy
+
+            # Sample MoGe depth in a small neighbourhood around the projected pixel.
+            depths: list[float] = []
+            for dv in range(-15, 16, 5):
+                for du in range(-15, 16, 5):
+                    u_ = int(np.clip(round(u_kp) + du, 0, W_img - 1))
+                    v_ = int(np.clip(round(v_kp) + dv, 0, H_img - 1))
+                    d  = float(seed_depth[v_, u_])
+                    if 0 < d < 10.0:
+                        depths.append(d)
+
+            if not depths:
+                continue
+
+            z_metric = float(np.median(depths))
+            kp_metric = np.array([
+                (u_kp - cx) / fx * z_metric,
+                (v_kp - cy) / fy * z_metric,
+                z_metric,
+            ], dtype=np.float32)
+            # Each probe gives an independent estimate of the wrist camera position.
+            implied_wrists.append(kp_metric - (kps[ki] - kps[0]).astype(np.float32))
+
+        if implied_wrists:
+            wrist_metric = np.median(implied_wrists, axis=0).astype(np.float32)
+        else:
+            # No valid depth pixels found; fall back to placing the hand at the
+            # same depth as the object (FP translation).
+            wrist_metric = np.array(
+                [float(c_obj[0]), float(c_obj[1]), float(c_obj[2])], dtype=np.float32
+            )
+
+        print(f"[s6] wrist_metric={wrist_metric.tolist()}  ({len(implied_wrists)} probe points)")
+
+        wrist_local  = kps[0].astype(np.float32)
+        kps_metric   = (kps   - wrist_local + wrist_metric).astype(np.float32)
+        verts_metric = (verts - wrist_local + wrist_metric).astype(np.float32)
 
         wrist_metric         = kps_metric[0]
         finger_center_metric = kps_metric[FINGERTIP_KP_IDX].mean(axis=0)
         finger_dist          = float(np.linalg.norm(finger_center_metric - wrist_metric))
-        print(f"[s6] mano_trans={mano_trans.tolist()}")
         print(f"[s6] wrist_cam={wrist_metric.tolist()}")
         print(f"[s6] finger_center_cam={finger_center_metric.tolist()}  finger_dist={finger_dist:.3f}m")
 
