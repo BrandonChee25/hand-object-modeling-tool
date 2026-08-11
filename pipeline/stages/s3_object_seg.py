@@ -478,6 +478,27 @@ class ObjectSegmentationStage:
                       f"{int(obj.sum())} px nearest")
                 _add_candidate(obj, fidx, fd, "depth-band", tip_point)
 
+        # --- strategy 5: SAM3 full-image box ---
+        # Uses the full image as the bounding box so SAM3's "held object" text
+        # understanding can find the complete object without spatial constraints.
+        # Useful for long objects (spoons, tools) whose ends extend far from the hand.
+        if self._model_type == "sam3":
+            for fd in frame_data:
+                fidx, frame, hand_mask = fd["fidx"], fd["frame"], fd["hand_mask"]
+                depth, hand_depth      = fd["depth"], fd["hand_depth"]
+                tip_points             = fd["tip_points"]
+                full_box = (0, 0, W - 1, H - 1)
+                print(f"[s3] frame {fidx}: trying SAM3 full-image box")
+                mask = self.seg_model.segment_held_object(
+                    frame.image,
+                    tuple(frame.hand_bbox.astype(int)),
+                    hand_mask,
+                    object_bbox_hint=full_box,
+                )
+                if mask is not None and mask.any():
+                    tip_point = tip_points[0] if tip_points else None
+                    _add_candidate(mask, fidx, fd, "SAM3-fullbox", tip_point)
+
         if all_candidates:
             all_candidates.sort(key=lambda x: x[0], reverse=True)
             best_score, best_fidx, best_mask, best_label = all_candidates[0]
