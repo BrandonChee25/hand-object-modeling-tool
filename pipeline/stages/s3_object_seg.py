@@ -478,37 +478,6 @@ class ObjectSegmentationStage:
                       f"{int(obj.sum())} px nearest")
                 _add_candidate(obj, fidx, fd, "depth-band", tip_point)
 
-        # --- strategy 5: SAM auto-segment + depth filter ---
-        # Runs SAM's everything-segmentation on the full image without any prompt,
-        # then filters proposals to those at hand depth (tight ±10% band) that don't
-        # overlap the hand.  No proximity-to-hand requirement, so it can find object
-        # parts far from the grip (e.g. spoon bowl, tool head).  Only tried on the
-        # anchor frame (auto-seg is slow).
-        if True:
-            fd = next((f for f in frame_data if f["fidx"] == data.anchor_index), None)
-            if fd is None and frame_data:
-                fd = frame_data[0]
-            if fd is not None and fd["depth"] is not None and fd["hand_depth"] is not None:
-                fidx, frame, hand_mask = fd["fidx"], fd["frame"], fd["hand_mask"]
-                depth, hand_depth      = fd["depth"], fd["hand_depth"]
-                tip_point              = fd["tip_points"][0] if fd["tip_points"] else None
-                print(f"[s3] frame {fidx}: trying SAM auto-segment + depth filter")
-                depth_lo = hand_depth * 0.90
-                depth_hi = hand_depth * 1.10
-                segments = self._fallback_sam2.auto_segment(frame.image)
-                print(f"[s3] frame {fidx}: auto-seg produced {len(segments)} proposals")
-                for seg in segments:
-                    if not seg.any():
-                        continue
-                    overlap = float((seg & hand_mask).sum()) / (float(seg.sum()) + 1e-6)
-                    if overlap > self.cfg.get("hand_overlap_threshold", 0.30):
-                        continue
-                    md = _median_depth(depth, seg)
-                    if md is None or md < depth_lo or md > depth_hi:
-                        continue
-                    seg = seg & ~hand_mask
-                    _add_candidate(seg, fidx, fd, "auto-seg", tip_point)
-
         if all_candidates:
             all_candidates.sort(key=lambda x: x[0], reverse=True)
             best_score, best_fidx, best_mask, best_label = all_candidates[0]
