@@ -361,7 +361,10 @@ class ObjectSegmentationStage:
                 r=int(hand_size * 0.55), half=int(hand_size * 0.7),
             ))
 
-        all_candidates: list[tuple[float, int, np.ndarray]] = []
+        all_candidates: list[tuple[float, int, np.ndarray, str]] = []
+        cand_dir = (output_dir / "seg_candidates")
+        cand_dir.mkdir(parents=True, exist_ok=True)
+        cand_counter = [0]
 
         def _add_candidate(mask, fidx, fd, label, tip_point=None):
             if self._valid_object_mask(
@@ -371,10 +374,15 @@ class ObjectSegmentationStage:
                     mask, fd["depth"], fd["hand_depth"], tip_point, H, W,
                     hand_bbox=fd["frame"].hand_bbox,
                 )
-                all_candidates.append((score, fidx, mask))
+                all_candidates.append((score, fidx, mask, label))
                 print(f"[s3] frame {fidx} {label}: candidate score={score:.3f} "
                       f"(compact={compact:.3f}, tip_prox={prox:.3f}, "
                       f"depth_prox={depth_prox:.3f}, size={size_score:.3f})")
+                _save_candidate_mask(
+                    fd["frame"].image, fd["hand_mask"], mask,
+                    cand_dir, cand_counter[0], fidx, label, score,
+                )
+                cand_counter[0] += 1
 
         # --- strategy 1: SAM-2 box (no positive point) ---
         for fd in frame_data:
@@ -472,9 +480,9 @@ class ObjectSegmentationStage:
 
         if all_candidates:
             all_candidates.sort(key=lambda x: x[0], reverse=True)
-            best_score, best_fidx, best_mask = all_candidates[0]
-            print(f"[s3] selected frame {best_fidx} score={best_score:.3f} "
-                  f"({len(all_candidates)} candidates evaluated)")
+            best_score, best_fidx, best_mask, best_label = all_candidates[0]
+            print(f"[s3] selected frame {best_fidx} '{best_label}' score={best_score:.3f} "
+                  f"({len(all_candidates)} candidates evaluated, saved to {cand_dir})")
             return best_fidx, best_mask
 
         print("[s3] all prompted attempts failed — using contact heuristic")
@@ -643,6 +651,28 @@ def _median_depth(
     vals = depth_map[mask]
     vals = vals[np.isfinite(vals) & (vals > 0)]
     return float(np.median(vals)) if len(vals) > 0 else None
+
+
+def _save_candidate_mask(
+    image: np.ndarray,
+    hand_mask: np.ndarray,
+    object_mask: np.ndarray,
+    out_dir: Path,
+    idx: int,
+    fidx: int,
+    label: str,
+    score: float,
+) -> None:
+    from PIL import Image as PILImage, ImageDraw, ImageFont
+    overlay = image.copy()
+    overlay[hand_mask]   = (overlay[hand_mask]   * 0.5 + np.array([255, 0, 0])   * 0.5).clip(0, 255).astype(np.uint8)
+    overlay[object_mask] = (overlay[object_mask] * 0.5 + np.array([0, 255, 0])   * 0.5).clip(0, 255).astype(np.uint8)
+    img = PILImage.fromarray(overlay)
+    draw = ImageDraw.Draw(img)
+    safe_label = label.replace(" ", "_").replace("/", "-")
+    draw.text((4, 4), f"#{idx}  f{fidx}  {label}  score={score:.3f}", fill=(255, 255, 0))
+    fname = out_dir / f"{idx:03d}_f{fidx}_{safe_label}_score{score:.3f}.png"
+    img.save(fname)
 
 
 def _save_debug_mask(
