@@ -384,6 +384,24 @@ class ObjectSegmentationStage:
                 )
                 cand_counter[0] += 1
 
+        # --- strategy 0: SAM-2 point-only (no bounding box) ---
+        # No box constraint lets SAM segment the full object shape freely.
+        # Useful for long objects (spoons, tools) that extend beyond the hand bbox.
+        for fd in frame_data:
+            fidx, frame, hand_mask = fd["fidx"], fd["frame"], fd["hand_mask"]
+            depth, hand_depth      = fd["depth"], fd["hand_depth"]
+            tip_points             = fd["tip_points"]
+            for tip_point in tip_points:
+                print(f"[s3] frame {fidx}: trying SAM-2 point-only {tip_point}")
+                mask = self._fallback_sam2.segment_with_point(frame.image, tip_point)
+                if mask is not None and mask.any():
+                    mask = mask & ~hand_mask
+                    if depth is not None and hand_depth is not None:
+                        mask = _closest_depth_component(mask, depth, hand_depth, tip_point)
+                    else:
+                        mask = _nearest_component(mask, tip_point)
+                    _add_candidate(mask, fidx, fd, "SAM-2 point", tip_point)
+
         # --- strategy 1: SAM-2 box (no positive point) ---
         for fd in frame_data:
             fidx, frame, hand_mask = fd["fidx"], fd["frame"], fd["hand_mask"]
