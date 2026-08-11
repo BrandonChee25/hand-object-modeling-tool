@@ -199,7 +199,7 @@ class ObjectSegmentationStage:
             seed_index = data.anchor_index
             print(f"[s3] used manual object_point {object_point}")
         else:
-            seed_index, seed_mask = self._find_held_object(data)
+            seed_index, seed_mask = self._find_held_object(data, output_dir)
 
         seed_frame = data.frames[seed_index]
         hand_mask = self._hand_mask_for(seed_frame, hand_results_map.get(seed_index))
@@ -302,7 +302,7 @@ class ObjectSegmentationStage:
         total = 0.35 * compactness + 0.30 * prox + 0.15 * depth_prox + 0.20 * size_score
         return total, compactness, prox, depth_prox, size_score
 
-    def _find_held_object(self, data: PipelineData) -> tuple[int, np.ndarray]:
+    def _find_held_object(self, data: PipelineData, output_dir: Path) -> tuple[int, np.ndarray]:
         """Find the held object seed mask.
 
         Two-pass approach: all strategies run on all candidate frames, every
