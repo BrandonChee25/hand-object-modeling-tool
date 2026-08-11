@@ -46,6 +46,9 @@ class SAM3SegModel:
         hand_mask: np.ndarray,
         expand: float = 0.3,
         object_bbox_hint: tuple[int, int, int, int] | None = None,
+        tip_point: tuple[int, int] | None = None,
+        depth: np.ndarray | None = None,
+        hand_depth: float | None = None,
     ) -> np.ndarray | None:
         """Single-frame: find held object via a directed box prompt.
 
@@ -108,15 +111,35 @@ class SAM3SegModel:
             if not cand.any():
                 continue
 
-            # Strip hand pixels and keep largest component.
+            # Strip hand pixels then pick the best component.
             cand = cand & ~hand_mask
             if not cand.any():
                 continue
 
             labeled, n = _label(cand)
             if n > 1:
-                sizes = np.array([(labeled == i).sum() for i in range(1, n + 1)])
-                cand = (labeled == (np.argmax(sizes) + 1)).astype(bool)
+                if tip_point is not None and depth is not None and hand_depth is not None:
+                    # Pick component whose median depth is closest to hand depth,
+                    # breaking ties by proximity to the fingertip centroid.
+                    best_id, best_score = 1, float("inf")
+                    for cid in range(1, n + 1):
+                        comp = labeled == cid
+                        vals = depth[comp]
+                        vals = vals[np.isfinite(vals) & (vals > 0)]
+                        if len(vals) == 0:
+                            continue
+                        depth_dist = abs(float(np.median(vals)) - hand_depth)
+                        ys, xs = np.where(comp)
+                        tip_dist = float(np.sqrt((xs.mean() - tip_point[0]) ** 2 +
+                                                 (ys.mean() - tip_point[1]) ** 2))
+                        score = depth_dist * 10 + tip_dist * 0.01
+                        if score < best_score:
+                            best_score, best_id = score, cid
+                    cand = (labeled == best_id).astype(bool)
+                else:
+                    # Fallback: largest component
+                    sizes = np.array([(labeled == i).sum() for i in range(1, n + 1)])
+                    cand = (labeled == (np.argmax(sizes) + 1)).astype(bool)
 
             eroded = binary_erosion(cand, iterations=3)
             if eroded.any():

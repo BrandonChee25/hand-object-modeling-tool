@@ -494,6 +494,9 @@ class ObjectSegmentationStage:
                     tuple(frame.hand_bbox.astype(int)),
                     hand_mask,
                     object_bbox_hint=full_box,
+                    tip_point=tip_points[0] if tip_points else None,
+                    depth=depth,
+                    hand_depth=hand_depth,
                 )
                 if mask is not None and mask.any():
                     tip_point = tip_points[0] if tip_points else None
