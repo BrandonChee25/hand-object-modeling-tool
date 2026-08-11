@@ -478,39 +478,6 @@ class ObjectSegmentationStage:
                       f"{int(obj.sum())} px nearest")
                 _add_candidate(obj, fidx, fd, "depth-band", tip_point)
 
-        # --- strategy 5: SAM3 medium box (4× hand size) ---
-        # Larger than the fingertip-centred box in strategy 3 but avoids the
-        # full-image noise problem.  Gives SAM3 enough room to find object ends
-        # (e.g. spoon bowl / handle tip) that extend beyond the hand region.
-        if self._model_type == "sam3":
-            for fd in frame_data:
-                fidx, frame, hand_mask = fd["fidx"], fd["frame"], fd["hand_mask"]
-                depth, hand_depth      = fd["depth"], fd["hand_depth"]
-                tip_points, hand_size  = fd["tip_points"], fd["hand_size"]
-                if not tip_points:
-                    continue
-                tip_point = tip_points[0]
-                half = int(hand_size * 2)
-                med_box = (
-                    max(0,     tip_point[0] - half),
-                    max(0,     tip_point[1] - half),
-                    min(W - 1, tip_point[0] + half),
-                    min(H - 1, tip_point[1] + half),
-                )
-                print(f"[s3] frame {fidx}: trying SAM3 medium box {med_box} "
-                      f"({med_box[2]-med_box[0]}×{med_box[3]-med_box[1]}px)")
-                mask = self.seg_model.segment_held_object(
-                    frame.image,
-                    tuple(frame.hand_bbox.astype(int)),
-                    hand_mask,
-                    object_bbox_hint=med_box,
-                    tip_point=tip_point,
-                    depth=depth,
-                    hand_depth=hand_depth,
-                )
-                if mask is not None and mask.any():
-                    _add_candidate(mask, fidx, fd, "SAM3-medbox", tip_point)
-
         if all_candidates:
             all_candidates.sort(key=lambda x: x[0], reverse=True)
             best_score, best_fidx, best_mask, best_label = all_candidates[0]
